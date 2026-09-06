@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>nl.polman.stremio-repatch</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>__REPO__/launchd/stremio-repatch-watch.sh</string></array>
+  <key>WatchPaths</key><array>
+    <string>/Applications/Stremio.app/Contents/MacOS/server.js</string>
+    <string>/Applications/Stremio.app/Contents/Info.plist</string>
+  </array>
+  <key>StartInterval</key><integer>3600</integer>
+  <key>ThrottleInterval</key><integer>120</integer>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>__REPO__/backups/repatch-launchd.log</string>
+  <key>StandardErrorPath</key><string>__REPO__/backups/repatch-launchd.log</string>
+</dict></plist>
