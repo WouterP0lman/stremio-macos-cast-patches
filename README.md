@@ -127,13 +127,13 @@ Remove with `launchctl bootout gui/$(id -u)/nl.polman.stremio-repatch`.
 
 ## Upstream
 
-The server is not open source. Issue texts ready for `Stremio/stremio-bugs` are in `issues/`. Related earlier reports of the crash: [stremio-bugs #327](https://github.com/Stremio/stremio-bugs/issues/327) (2021), [stremio-bugs #383](https://github.com/Stremio/stremio-bugs/issues/383) (2022).
+The server is not open source. Both bugs are filed at `Stremio/stremio-bugs`: [#2786](https://github.com/Stremio/stremio-bugs/issues/2786) (server crash on malformed UPnP XML) and [#2787](https://github.com/Stremio/stremio-bugs/issues/2787) (Vorbis casting, ffmpeg 7 stream parsing). The submitted texts are in `issues/`. Related earlier reports of the crash: [stremio-bugs #327](https://github.com/Stremio/stremio-bugs/issues/327) (2021), [stremio-bugs #383](https://github.com/Stremio/stremio-bugs/issues/383) (2022).
 
 ## Files
 
 - `stremio-upnp-patch.sh`: the patch script (apply, `DRY=1`, or `STREMIO_SERVER_JS=<copy>` to test on a copy)
 - `launchd/`: optional re-patch watcher for after auto-updates
 - `evidence/regex-test.js`: regex unit test
-- `issues/`: upstream bug report texts
+- `issues/`: the bug reports as filed upstream (#2786, #2787)
 
 Not affiliated with Stremio. Use at your own risk; keep the backups the script writes.
