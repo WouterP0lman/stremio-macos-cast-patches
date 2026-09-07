@@ -14,6 +14,8 @@
 #  7  better AAC fallback               : aac_at (Apple AudioToolbox) at 192 kbit/s instead of ffmpeg's native aac at 128
 #  8  subtitle sync                     : do not pre-shift the .srt; with -copyts the frames keep their original PTS,
 #                                        so shifting made burned-in subtitles drift (measured 18s off at offset 20) and vanish
+# 10  subtitle delay in JS            : shift the .srt text instead of ffmpeg -ss, which cannot seek a subtitle
+#                                        stream and rebased on the previous cue; enables working earlier/later timing
 #  9  repair TV event XML                : LG echoes our cast URL with unescaped '&' plus a trailing NUL byte, so every UPnP
 #                                        status event was unparseable; repair instead of discard, restoring transport state
 # A Stremio auto-update replaces server.js and removes all of this; just run the script again (or install launchd/).
@@ -101,10 +103,12 @@ else:
 
 # 8: subtitle sync, makeSubs must not pre-shift the srt (frames keep original PTS because of -copyts)
 OLD8 = 'this.makeSubs(req.query.subtitles, Math.max(0, offset - subtitlesDelay))'
-NEW8 = 'this.makeSubs(req.query.subtitles, 0)'
+MID8 = 'this.makeSubs(req.query.subtitles, 0)'          # first form of this patch
+NEW8 = 'this.makeSubs(req.query.subtitles, subtitlesDelay)'
 if any(NEW8 in l for l in L): print("patch 8: present")
 else:
-    i = one(lambda l: OLD8 in l, "patch 8"); L[i] = L[i].replace(OLD8, NEW8, 1)
+    i = one(lambda l: OLD8 in l or MID8 in l, "patch 8")
+    L[i] = L[i].replace(MID8 if MID8 in L[i] else OLD8, NEW8, 1)
     changed.append(8); print("patch 8: applied (line %d)" % (i+1))
 
 # 9: repair malformed UPnP event XML (unescaped & and control chars) instead of discarding the event
@@ -119,6 +123,28 @@ else:
     assert "et.parse(lastChange)" in L[j], L[j]
     L[j] = L[j].replace("et.parse(lastChange)", "et.parse(fixXml(lastChange))", 1)
     changed.append(9); print("patch 9: applied (lines %d-%d)" % (i, j+1))
+
+# 10: subtitle delay done in JS on the srt text (ffmpeg cannot seek a subtitle stream accurately)
+SHIFT = ('var shiftSrt = function (t, ms) { return ms ? t.replace(/(\\d{2}):(\\d{2}):(\\d{2}),(\\d{3})/g, '
+         'function (m, h, mi, s, ms3) { var v = ((+h * 3600 + +mi * 60 + +s) * 1000 + +ms3) + ms; if (v < 0) v = 0; '
+         'var p = function (n, w) { return ("000" + n).slice(-w); }; '
+         'return p(Math.floor(v / 3600000), 2) + ":" + p(Math.floor(v % 3600000 / 60000), 2) + ":" '
+         '+ p(Math.floor(v % 60000 / 1000), 2) + "," + p(v % 1000, 3); }) : t; }; ')
+if any("var shiftSrt = function" in l for l in L): print("patch 10: present")
+else:
+    i = one(lambda l: "Casting.prototype.makeSubs = function(subsUrl, offset)" in l, "patch 10")
+    j = next(k for k in range(i, i + 6) if L[k].strip() == "var self = this;")
+    L[j] = L[j].replace("var self = this;", "var self = this; " + SHIFT, 1)
+    k = one(lambda l: 'subs = Buffer.from(text.replace(/\\r/g, ""), "utf8")' in l, "patch 10 (buffer)")
+    L[k] = L[k].replace('Buffer.from(text.replace(/\\r/g, ""), "utf8")', 'Buffer.from(shiftSrt(text.replace(/\\r/g, ""), offset), "utf8")', 1)
+    m = one(lambda l: l.strip().startswith("return offset ? new Promise(") and "tmp.file" not in l, "patch 10 (ffmpeg shift)")
+    ind = L[m][: len(L[m]) - len(L[m].lstrip())]
+    depth = 0
+    for e in range(m, m + 25):
+        depth += L[e].count("(") - L[e].count(")")
+        if depth <= 0 and e > m: break
+    L[m:e + 1] = [ind + "return sourceSubsFn;"]
+    changed.append(10); print("patch 10: applied (lines %d-%d)" % (j + 1, m + 1))
 
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)

@@ -142,6 +142,66 @@ It finds the active cast, reads the current position, fetches a track from the O
 
 Known limits: seeking from the TV remote is impossible (the server advertises `DLNA.ORG_OP=01` but has no `TimeSeekRange` handler, and the piped Matroska has no length or cues), and turning subtitles on replaces the lossless video copy with a libx264 ultrafast re-encode for as long as they are on.
 
+## Tools: remote, sync and subtitles
+
+Three scripts sit on top of the patches. They talk to the streaming server's own
+casting API (`/casting`, `/casting/<device>/player`), so they work for DLNA TVs
+and Chromecasts alike.
+
+### `remote/cast-remote.py` - a remote control in your browser
+
+```bash
+python3 remote/cast-remote.py     # then open http://localhost:11471
+```
+
+Seek by 10s/30s/1m/5m or scrub to any point, pause, volume, stop. Subtitles with
+a language picker (it identifies what is playing through Cinemeta and lists what
+OpenSubtitles has) and earlier/later timing in half-second steps. It polls the
+device every two seconds and pauses polling right after a command, because every
+change restarts the stream.
+
+### `remote/cast-sync.py` - start where you left off, with subtitles
+
+Casting always begins at 0 with no subtitles: `DLNAClient.play` (line 89073)
+resets `time` and `subtitlesSrc`, and the UI never sends either. But Stremio does
+store your position, in the web UI's localStorage under `library_recent`:
+
+```json
+{"video_id": "tt14186672:1:3", "timeOffset": 1554247, "duration": 3268932}
+```
+
+This reads that file, matches the streaming file name to the library entry
+(title plus SxxExx), and applies the position and a subtitle track to the cast.
+When the episode has no stored position yet it still derives the video id from
+the show's IMDb id and the file name, so subtitles work on a fresh episode.
+
+```bash
+python3 remote/cast-sync.py            # watch, fix every new cast automatically
+python3 remote/cast-sync.py --once     # fix the cast running now
+python3 remote/cast-sync.py --dry      # show what it would do
+python3 remote/cast-sync.py --lang dut # another language
+python3 remote/cast-sync.py --no-subs  # position only
+```
+
+Stremio writes that position every few minutes rather than continuously, so it
+can lag a couple of minutes behind what is on screen.
+
+### `cast-subs.py` - subtitles and position by hand
+
+```bash
+python3 cast-subs.py tt14186672:1:3        # subtitles for an episode
+python3 cast-subs.py --at 24:01            # jump to a position
+python3 cast-subs.py off                   # subtitles off
+```
+
+### One thing to know about combining commands
+
+Setting subtitles and a position in a single request does not stick. The
+subtitle change restarts the stream, and during that restart Stremio accepts the
+device's own position again (which patch 9 made possible), overwriting the
+requested one. Send them as two commands a few seconds apart; `cast-sync.py`
+already does that.
+
 ## Smaller findings
 
 - `-vbsf` was removed in ffmpeg 7. The legacy HLSv1 DLNA MPEG-TS route (`segmentApi.DLNAMpegTtsMiddleware`) passes `-vbsf h264_mp4toannexb` and exits with code 8. Not on the Stremio 5 cast path. Patch 5 changes it to `-bsf:v`.
@@ -165,6 +225,7 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 7 | `Casting.prototype.transcode`, line 83073 | AAC fallback uses `aac_at` (AudioToolbox) at 192 kbit/s instead of native `aac` at ~128 |
 | 8 | `Casting.prototype.transcode`, line 83039 | do not pre-shift the .srt; with `-copyts` the frames keep their original PTS, so shifting desynced burned-in subtitles |
 | 9 | `ensureEventingServer`, lines 89491-89493 | repair the TV's malformed event XML instead of discarding it, restoring transport state updates |
+| 10 | `Casting.prototype.makeSubs`, lines 83000-83015 | shift the .srt text in JS instead of `ffmpeg -ss`, so subtitle delay (earlier/later) actually works |
 
 Editing a file inside the bundle breaks the code signature seal. The script re-signs the app ad hoc with `--preserve-metadata=entitlements,flags,identifier`, so the hardened runtime flag and entitlements stay. The Developer ID signature and notarization ticket no longer apply to the modified bundle. The app launches normally on macOS 26.5.1 after this. Backups of the original `server.js` and `_CodeSignature` are written to `backups/<timestamp>/` before every change.
 
@@ -197,6 +258,8 @@ The server is not open source. Both bugs are filed at `Stremio/stremio-bugs`: [#
 - `stremio-upnp-patch.sh`: the patch script (apply, `DRY=1`, or `STREMIO_SERVER_JS=<copy>` to test on a copy)
 - `launchd/`: optional re-patch watcher for after auto-updates
 - `cast-subs.py`: turn subtitles on for a running cast
+- `remote/cast-remote.py`: browser remote control (seek, subtitles, timing)
+- `remote/cast-sync.py`: resume where you left off, with subtitles
 - `evidence/regex-test.js`: regex unit test
 - `issues/`: the bug reports as filed upstream (#2786, #2787)
 
