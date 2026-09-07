@@ -10,6 +10,8 @@
 #  3  SOAP response try/catch             : same crash class as 1, for replies to Play/Stop/GetPositionInfo
 #  4  casting regex: optional profile     : "Audio: ac3, 48000 Hz, ..." lost channels/default; multi-audio picked the wrong track
 #  5  -vbsf -> -bsf:v                     : -vbsf no longer exists in ffmpeg 7 (legacy HLSv1 DLNA route, exit 8)
+#  6  DLNA: AC3 passthrough              : keep Dolby Digital 5.1 as is for DLNA TVs (they carry an AC-3 decoder) instead of AAC stereo
+#  7  better AAC fallback               : aac_at (Apple AudioToolbox) at 192 kbit/s instead of ffmpeg's native aac at 128
 # A Stremio auto-update replaces server.js and removes all of this; just run the script again (or install launchd/).
 set -e
 APP=/Applications/Stremio.app
@@ -75,6 +77,23 @@ else:
     assert len(h) == 2 and all("_mp4toannexb" in L[i] for i in h), "patch 5: unexpected -vbsf hits %r" % h
     for i in h: L[i] = L[i].replace('"-vbsf"', '"-bsf:v"', 1)
     changed.append(5); print("patch 5: applied (lines %s)" % ", ".join(str(i+1) for i in h))
+
+# 6: DLNA route (/casting/transcode.mp4) passes AC3 through; Chromecast (/casting/transcode) keeps AAC stereo
+OLD6 = 'copyAudio = "aac" == audioStream.codec && "stereo" == audioStream.channels)'
+NEW6 = 'copyAudio = "aac" == audioStream.codec && "stereo" == audioStream.channels || /\\.mp4(\\?|$)/i.test(req.originalUrl || req.url) && "ac3" == audioStream.codec)'
+PREV6 = 'copyAudio = "aac" == audioStream.codec && "stereo" == audioStream.channels || /\\.mp4$/i.test(req.path) && "ac3" == audioStream.codec)'   # first variant, req.path is undefined in pillarjs/router
+if any(NEW6 in l for l in L): print("patch 6: present")
+else:
+    i = one(lambda l: OLD6 in l or PREV6 in l, "patch 6"); L[i] = L[i].replace(PREV6 if PREV6 in L[i] else OLD6, NEW6, 1)
+    changed.append(6); print("patch 6: applied (line %d)" % (i+1))
+
+# 7: AAC fallback via AudioToolbox at 192 kbit/s
+OLD7 = '"-c:a", "aac", "-ac", "2")'
+NEW7 = '"-c:a", "aac_at", "-b:a", "192k", "-ac", "2")'
+if any(NEW7 in l for l in L): print("patch 7: present")
+else:
+    i = one(lambda l: OLD7 in l and "copyAudio ?" in l, "patch 7"); L[i] = L[i].replace(OLD7, NEW7, 1)
+    changed.append(7); print("patch 7: applied (line %d)" % (i+1))
 
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)

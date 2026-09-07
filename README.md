@@ -83,6 +83,31 @@ Fix (patch 2): allow an optional `[...]` block after the stream index: `#(\d+:\d
 
 Patch 4 additionally makes the profile parenthetical after the codec name optional, because ffmpeg 7 prints `Audio: ac3, 48000 Hz, 5.1(side), ...` without `(profile)` for ac3, eac3, opus, vorbis and flac. Without it those tracks lose their channel layout and `(default)` flag, and the default-track selection picks the first track instead of the flagged one on multi-audio files.
 
+## Quality: audio for DLNA TVs (patches 6 and 7)
+
+Video is already a stream copy, so the only lossy step in a cast is audio. The handler copies audio only when it is `aac` and `stereo`; everything else is downmixed to AAC stereo. For a DLNA TV that is a needless loss: the LG's advertised MPEG-TS `_NA` profiles imply an AC-3 decoder, and 2012 LG sets play Dolby Digital inside Matroska.
+
+Patch 6 adds an AC3 passthrough for the DLNA route only. The two cast clients use different URLs, which is what the condition keys on:
+
+- `DLNAClient` requests `/casting/transcode.mp4` (`transcodeURL = endpoint + baseUrl + "/transcode.mp4"`)
+- `ChromecastClient` requests `/casting/transcode` (no extension)
+
+so `/\.mp4(\?|$)/i.test(req.originalUrl || req.url)` is true only for the TV. Note that `req.path` does not exist on this router (the bundle uses pillarjs/router, not full express), so the test must use `req.originalUrl`/`req.url`.
+
+Only AC3 passes through. E-AC3, DTS, TrueHD and everything else still transcode, because the LG does not decode them.
+
+Patch 7 replaces the fallback encoder `aac` with `aac_at` (Apple AudioToolbox) at 192 kbit/s. Measured on the same source: 129 kbit/s before, 197 kbit/s after.
+
+Verified end to end against the running server:
+
+| Route | Source audio | Result |
+|---|---|---|
+| `/casting/transcode.mp4` (TV) | AC3 5.1 | `ac3, 6ch` (copy) |
+| `/casting/transcode` (Chromecast) | AC3 5.1 | `aac, 2ch` (unchanged behaviour) |
+| `/casting/transcode.mp4` (TV) | E-AC3 5.1 | `aac, 2ch` (no passthrough) |
+
+If a TV stays silent with AC3, it has no Dolby Digital decoder for this container; revert patch 6 by restoring `server.js` from `backups/` and re-running the script without it.
+
 ## Smaller findings
 
 - `-vbsf` was removed in ffmpeg 7. The legacy HLSv1 DLNA MPEG-TS route (`segmentApi.DLNAMpegTtsMiddleware`) passes `-vbsf h264_mp4toannexb` and exits with code 8. Not on the Stremio 5 cast path. Patch 5 changes it to `-bsf:v`.
@@ -102,6 +127,8 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 3 | `DeviceClient.callAction`, line 89388 | try/catch around the SOAP response parse, null-safe `errorDescription` |
 | 4 | `castingUtils.getVideoInfo`, line 22675 | profile parenthetical after the codec name is optional |
 | 5 | `segmentMiddlewareArgs.video.getFilter`, lines 62954 and 62955 | `-vbsf` becomes `-bsf:v` |
+| 6 | `Casting.prototype.transcode`, line 83062 | DLNA route keeps AC3 as is (stream copy) instead of downmixing to AAC stereo |
+| 7 | `Casting.prototype.transcode`, line 83073 | AAC fallback uses `aac_at` (AudioToolbox) at 192 kbit/s instead of native `aac` at ~128 |
 
 Editing a file inside the bundle breaks the code signature seal. The script re-signs the app ad hoc with `--preserve-metadata=entitlements,flags,identifier`, so the hardened runtime flag and entitlements stay. The Developer ID signature and notarization ticket no longer apply to the modified bundle. The app launches normally on macOS 26.5.1 after this. Backups of the original `server.js` and `_CodeSignature` are written to `backups/<timestamp>/` before every change.
 
