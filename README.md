@@ -108,6 +108,40 @@ Verified end to end against the running server:
 
 If a TV stays silent with AC3, it has no Dolby Digital decoder for this container; revert patch 6 by restoring `server.js` from `backups/` and re-running the script without it.
 
+## Subtitles when casting to a DLNA TV (patches 8 and 9, plus cast-subs.py)
+
+Three separate problems stack up here.
+
+**The UI never passes the subtitle along.** `Player.prototype.middleware` (line 42214) only dispatches `subtitles` when a request carries `subtitlesSrc`, `subtitlesDelay` or `subtitlesSize`, and `DLNAClient.play` (line 89073) explicitly nulls `subtitlesSrc` when a cast starts. Reading the live cast URI off the TV with a read-only `GetMediaInfo` shows `...&audioTrack=0%3A1&time=0&subtitles=&subtitlesDelay=0`: the parameter is empty, and the running ffmpeg used `-c copy`, which per line 83053 (`copyVideo = !subtitles`) proves the server was never asked for subtitles. Picking a subtitle in the player before casting does not survive; picking one during the cast restarted the stream but still sent an empty value. `cast-subs.py` in this repo sends the request the UI should have sent.
+
+**The timing was wrong even when it did work.** `makeSubs` was called with `Math.max(0, offset - subtitlesDelay)` and shifts the .srt with `ffmpeg -ss`, while line 83070 passes `-copyts` so the decoded frames keep their original PTS. The subtitles therefore ran ahead by roughly the seek offset, then ran out. Worse, ffmpeg cannot seek inside a subtitle stream and rebases on the previous cue, so the actual shift is quantised (measured: 18 s for a requested 20 s). Patch 8 passes offset 0, which makes the original timings line up exactly and removes an ffmpeg spawn per cast. Demonstrated: shifting produced `00:00:00,000 --> CUE AT 20 SEC` for a cue that belongs at 20 s.
+
+**Soft subtitles are not an option on this TV.** `buildMetadata` (line 89148) already builds a complete `sec:CaptionInfo` / `sec:CaptionInfoEx` / `text/srt` sidecar block whenever `metadata.subtitlesUrl` is set, and `DLNAClient.playFromStatus` never sets it. Wiring it up is a two-line change, but the LG 42LM760S advertises no caption capability at all (no `sec:`/`pv:`/`xbmc:` namespace, no vendor service, nothing subtitle-related in its SCPDs), so it would be ignored. Burn-in, with its full libx264 re-encode, is the only route for this renderer. Chromecast already gets real soft subtitles through `_subsPrepare`.
+
+### Patch 9: the TV's own status messages were unparseable
+
+Capturing a real NOTIFY by subscribing to the TV's AVTransport service showed why every status event was lost. The LG echoes the cast URL back inside `LastChange` without escaping it, and appends a NUL byte:
+
+```
+...%2F5%3F&audioTrack=0%3A1&time=0&subtitles=&subtitlesDelay=0&quot;/&gt;...
+                      8 unescaped & , plus a trailing \x00
+```
+
+That is the exact payload behind the crash in patch 1, and it explains the follow-on symptom: after patch 1 stopped the crash the events were merely discarded, so Stremio never learned the playback position and restarted every stream at 0. Patch 9 repairs the document (`&` that starts no valid entity becomes `&amp;`, XML-illegal control characters are dropped) before both parses, and keeps patch 1's try/catch as a backstop. Verified against the captured event: 22 fields recovered, including `TransportState`, `TransportStatus` and `CurrentTrackDuration`.
+
+### cast-subs.py
+
+```bash
+python3 cast-subs.py tt14186672:1:3        # subtitles for a series episode
+python3 cast-subs.py tt1234567 dut         # a movie, Dutch
+python3 cast-subs.py --list tt14186672:1:3 # what is available
+python3 cast-subs.py off                   # back to the lossless copy
+```
+
+It finds the active cast, reads the current position, fetches a track from the OpenSubtitles v3 addon, checks that Stremio's own `/subtitles.srt` endpoint can parse it, and sends `subtitlesSrc` plus the position so playback resumes where it was. Only addon subtitles work: a track embedded in the file has no URL for `/subtitles.srt?from=` to fetch.
+
+Known limits: seeking from the TV remote is impossible (the server advertises `DLNA.ORG_OP=01` but has no `TimeSeekRange` handler, and the piped Matroska has no length or cues), and turning subtitles on replaces the lossless video copy with a libx264 ultrafast re-encode for as long as they are on.
+
 ## Smaller findings
 
 - `-vbsf` was removed in ffmpeg 7. The legacy HLSv1 DLNA MPEG-TS route (`segmentApi.DLNAMpegTtsMiddleware`) passes `-vbsf h264_mp4toannexb` and exits with code 8. Not on the Stremio 5 cast path. Patch 5 changes it to `-bsf:v`.
@@ -129,6 +163,8 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 5 | `segmentMiddlewareArgs.video.getFilter`, lines 62954 and 62955 | `-vbsf` becomes `-bsf:v` |
 | 6 | `Casting.prototype.transcode`, line 83062 | DLNA route keeps AC3 as is (stream copy) instead of downmixing to AAC stereo |
 | 7 | `Casting.prototype.transcode`, line 83073 | AAC fallback uses `aac_at` (AudioToolbox) at 192 kbit/s instead of native `aac` at ~128 |
+| 8 | `Casting.prototype.transcode`, line 83039 | do not pre-shift the .srt; with `-copyts` the frames keep their original PTS, so shifting desynced burned-in subtitles |
+| 9 | `ensureEventingServer`, lines 89491-89493 | repair the TV's malformed event XML instead of discarding it, restoring transport state updates |
 
 Editing a file inside the bundle breaks the code signature seal. The script re-signs the app ad hoc with `--preserve-metadata=entitlements,flags,identifier`, so the hardened runtime flag and entitlements stay. The Developer ID signature and notarization ticket no longer apply to the modified bundle. The app launches normally on macOS 26.5.1 after this. Backups of the original `server.js` and `_CodeSignature` are written to `backups/<timestamp>/` before every change.
 
@@ -160,6 +196,7 @@ The server is not open source. Both bugs are filed at `Stremio/stremio-bugs`: [#
 
 - `stremio-upnp-patch.sh`: the patch script (apply, `DRY=1`, or `STREMIO_SERVER_JS=<copy>` to test on a copy)
 - `launchd/`: optional re-patch watcher for after auto-updates
+- `cast-subs.py`: turn subtitles on for a running cast
 - `evidence/regex-test.js`: regex unit test
 - `issues/`: the bug reports as filed upstream (#2786, #2787)
 

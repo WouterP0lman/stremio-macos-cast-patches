@@ -12,6 +12,10 @@
 #  5  -vbsf -> -bsf:v                     : -vbsf no longer exists in ffmpeg 7 (legacy HLSv1 DLNA route, exit 8)
 #  6  DLNA: AC3 passthrough              : keep Dolby Digital 5.1 as is for DLNA TVs (they carry an AC-3 decoder) instead of AAC stereo
 #  7  better AAC fallback               : aac_at (Apple AudioToolbox) at 192 kbit/s instead of ffmpeg's native aac at 128
+#  8  subtitle sync                     : do not pre-shift the .srt; with -copyts the frames keep their original PTS,
+#                                        so shifting made burned-in subtitles drift (measured 18s off at offset 20) and vanish
+#  9  repair TV event XML                : LG echoes our cast URL with unescaped '&' plus a trailing NUL byte, so every UPnP
+#                                        status event was unparseable; repair instead of discard, restoring transport state
 # A Stremio auto-update replaces server.js and removes all of this; just run the script again (or install launchd/).
 set -e
 APP=/Applications/Stremio.app
@@ -33,7 +37,7 @@ def one(pred, what):
     return h[0]
 
 # 1: UPnP eventing try/catch
-i = one(lambda l: 'doc = et.parse(buf.toString()), lastChange = doc.findtext(".//LastChange")' in l, "patch 1")
+i = one(lambda l: 'lastChange = doc.findtext(".//LastChange")' in l and "et.parse(" in l, "patch 1")
 if "try {" in L[i-1]: print("patch 1: present (line %d)" % (i+1))
 else:
     assert L[i-1].rstrip().endswith("(function(buf) {"), L[i-1]
@@ -94,6 +98,27 @@ if any(NEW7 in l for l in L): print("patch 7: present")
 else:
     i = one(lambda l: OLD7 in l and "copyAudio ?" in l, "patch 7"); L[i] = L[i].replace(OLD7, NEW7, 1)
     changed.append(7); print("patch 7: applied (line %d)" % (i+1))
+
+# 8: subtitle sync, makeSubs must not pre-shift the srt (frames keep original PTS because of -copyts)
+OLD8 = 'this.makeSubs(req.query.subtitles, Math.max(0, offset - subtitlesDelay))'
+NEW8 = 'this.makeSubs(req.query.subtitles, 0)'
+if any(NEW8 in l for l in L): print("patch 8: present")
+else:
+    i = one(lambda l: OLD8 in l, "patch 8"); L[i] = L[i].replace(OLD8, NEW8, 1)
+    changed.append(8); print("patch 8: applied (line %d)" % (i+1))
+
+# 9: repair malformed UPnP event XML (unescaped & and control chars) instead of discarding the event
+FIX = 'var fixXml = function (x) { return String(x).replace(/[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]/g, "").replace(/&(?!(?:amp|lt|gt|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);)/g, "&amp;"); }; '
+if any("var fixXml = function" in l for l in L): print("patch 9: present")
+else:
+    i = one(lambda l: 'lastChange = doc.findtext(".//LastChange")' in l and "et.parse(" in l, "patch 9")
+    assert L[i-1].rstrip().endswith("try {"), "patch 9 requires patch 1 first: " + L[i-1][-40:]
+    L[i-1] = L[i-1].rstrip() + " " + FIX
+    L[i] = L[i].replace("et.parse(buf.toString())", "et.parse(fixXml(buf.toString()))", 1)
+    j = i + 1
+    assert "et.parse(lastChange)" in L[j], L[j]
+    L[j] = L[j].replace("et.parse(lastChange)", "et.parse(fixXml(lastChange))", 1)
+    changed.append(9); print("patch 9: applied (lines %d-%d)" % (i, j+1))
 
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
