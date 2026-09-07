@@ -162,9 +162,14 @@ change restarts the stream.
 
 ### `remote/cast-sync.py` - start where you left off, with subtitles
 
-Casting always begins at 0 with no subtitles: `DLNAClient.play` (line 89073)
-resets `time` and `subtitlesSrc`, and the UI never sends either. But Stremio does
-store your position, in the web UI's localStorage under `library_recent`:
+Casting always begins at 0 with no subtitles. `DLNAClient.play` reset `time` to
+zero unconditionally; patch 11 changes that, so a request carrying `time`
+alongside `source` now starts there (the dispatch at line 42227 passes it
+through, and both the DLNA and Chromecast `play()` take a second argument).
+Whether that alone is enough depends on the Stremio UI sending its position at
+all, which it does not appear to do. This script covers it either way, because
+Stremio does store your position, in the web UI's localStorage under
+`library_recent`:
 
 ```json
 {"video_id": "tt14186672:1:3", "timeOffset": 1554247, "duration": 3268932}
@@ -226,6 +231,7 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 8 | `Casting.prototype.transcode`, line 83039 | do not pre-shift the .srt; with `-copyts` the frames keep their original PTS, so shifting desynced burned-in subtitles |
 | 9 | `ensureEventingServer`, lines 89491-89493 | repair the TV's malformed event XML instead of discarding it, restoring transport state updates |
 | 10 | `Casting.prototype.makeSubs`, lines 83000-83015 | shift the .srt text in JS instead of `ffmpeg -ss`, so subtitle delay (earlier/later) actually works |
+| 11 | `Player.prototype.middleware` line 42227, both `play()` methods | a cast keeps the position the request carries instead of forcing 0 |
 
 Editing a file inside the bundle breaks the code signature seal. The script re-signs the app ad hoc with `--preserve-metadata=entitlements,flags,identifier`, so the hardened runtime flag and entitlements stay. The Developer ID signature and notarization ticket no longer apply to the modified bundle. The app launches normally on macOS 26.5.1 after this. Backups of the original `server.js` and `_CodeSignature` are written to `backups/<timestamp>/` before every change.
 

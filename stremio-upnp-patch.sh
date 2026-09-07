@@ -18,6 +18,7 @@
 #                                        stream and rebased on the previous cue; enables working earlier/later timing
 #  9  repair TV event XML                : LG echoes our cast URL with unescaped '&' plus a trailing NUL byte, so every UPnP
 #                                        status event was unparseable; repair instead of discard, restoring transport state
+# 11  cast keeps your position         : play() no longer forces time=0, so a cast can start where you were
 # A Stremio auto-update replaces server.js and removes all of this; just run the script again (or install launchd/).
 set -e
 APP=/Applications/Stremio.app
@@ -145,6 +146,25 @@ else:
         if depth <= 0 and e > m: break
     L[m:e + 1] = [ind + "return sourceSubsFn;"]
     changed.append(10); print("patch 10: applied (lines %d-%d)" % (j + 1, m + 1))
+
+# 11: a cast keeps the position the request carries instead of always starting at 0
+OLD11A = 'isset(params.source) && (params.source ? args[method = "play"] = params.source : method = "close")'
+NEW11A = 'isset(params.source) && (params.source ? args[method = "play"] = [ params.source, params.time ] : method = "close")'
+OLD11B = 'DLNAClient.prototype.play = function(srcURL) {'
+NEW11B = 'DLNAClient.prototype.play = function(srcURL, startAt) {'
+OLD11C = 'ChromecastClient.prototype.play = function(srcURL) {'
+NEW11C = 'ChromecastClient.prototype.play = function(srcURL, startAt) {'
+TIME0 = 'this.mediaStatus.time = 0'
+TIMEN = 'this.mediaStatus.time = parseInt(startAt, 10) || 0'
+if any(NEW11A in l for l in L): print("patch 11: present")
+else:
+    i = one(lambda l: OLD11A in l, "patch 11 (dispatch)"); L[i] = L[i].replace(OLD11A, NEW11A, 1)
+    for name, old, new in (("DLNA", OLD11B, NEW11B), ("Chromecast", OLD11C, NEW11C)):
+        j = one(lambda l, o=old: o in l, "patch 11 (%s play)" % name)
+        L[j] = L[j].replace(old, new, 1)
+        k = next(x for x in range(j, j + 4) if TIME0 in L[x])
+        L[k] = L[k].replace(TIME0, TIMEN, 1)
+    changed.append(11); print("patch 11: applied (line %d plus both play methods)" % (i+1))
 
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
