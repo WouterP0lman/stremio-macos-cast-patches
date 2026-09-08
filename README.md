@@ -309,7 +309,7 @@ Remove with `launchctl bootout gui/$(id -u)/nl.polman.stremio-repatch`.
 
 ## Upstream
 
-The server is not open source. Both bugs are filed at `Stremio/stremio-bugs`: [#2786](https://github.com/Stremio/stremio-bugs/issues/2786) (server crash on malformed UPnP XML) and [#2787](https://github.com/Stremio/stremio-bugs/issues/2787) (Vorbis casting, ffmpeg 7 stream parsing). The submitted texts are in `issues/`. Related earlier reports of the crash: [stremio-bugs #327](https://github.com/Stremio/stremio-bugs/issues/327) (2021), [stremio-bugs #383](https://github.com/Stremio/stremio-bugs/issues/383) (2022).
+The server is not open source. Three bugs are filed at `Stremio/stremio-bugs`: [#2786](https://github.com/Stremio/stremio-bugs/issues/2786) (server crash on malformed UPnP XML), [#2787](https://github.com/Stremio/stremio-bugs/issues/2787) (Vorbis casting, ffmpeg 7 stream parsing) and [#2789](https://github.com/Stremio/stremio-bugs/issues/2789) (casting always restarts at 0). Subtitles when casting are already tracked upstream in [#2732](https://github.com/Stremio/stremio-bugs/issues/2732), with [stremio-web#1446](https://github.com/Stremio/stremio-web/pull/1446) in draft. The submitted texts are in `issues/`. Related earlier reports of the crash: [stremio-bugs #327](https://github.com/Stremio/stremio-bugs/issues/327) (2021), [stremio-bugs #383](https://github.com/Stremio/stremio-bugs/issues/383) (2022).
 
 ## Files
 
@@ -319,6 +319,6 @@ The server is not open source. Both bugs are filed at `Stremio/stremio-bugs`: [#
 - `remote/cast-remote.py`: browser remote control (seek, subtitles, timing)
 - `remote/cast-sync.py`: resume where you left off, with subtitles
 - `evidence/regex-test.js`: regex unit test
-- `issues/`: the bug reports as filed upstream (#2786, #2787)
+- `issues/`: the bug reports as filed upstream (#2786, #2787, #2789)
 
 Not affiliated with Stremio. Use at your own risk; keep the backups the script writes.
