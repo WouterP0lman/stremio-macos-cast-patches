@@ -335,6 +335,22 @@ which casting proceeds without subtitles rather than hanging. Measured on a warm
 Storage locations are probed per platform (macOS paths are the tested ones; Windows and
 Linux candidates are in `_uiDb()` but unverified).
 
+### Only pass Dolby to devices that can decode it
+
+Patch 6 kept AC3 as a stream copy for the DLNA route, which is right for the LG this was
+built against but wrong as a blanket rule: a renderer without a Dolby decoder would get
+audio it cannot play, which is exactly the silence this whole exercise started with.
+
+Patch 15 asks the renderer instead. `DLNAClient` calls `getSupportedProtocols` once per
+cast and passes the answer to the transcoder as `ac3=1`, so `copyAudio` follows the device
+rather than the URL. Detection accepts an explicit `ac-3`/`dolby` entry, and also the
+MPEG-TS `_NA`/`_EU`/`_KO` profiles, which imply an AC-3 decoder: the LG advertises no AC3
+string at all but six of those profiles, and it does play Dolby.
+
+Checked against the LG's real sink list and two synthetic ones: the LG keeps its 5.1, a
+device advertising only mp4/AAC gets a stereo AAC downmix, and one naming AC-3 explicitly
+keeps 5.1.
+
 ### Why patch 10 was kept rather than replaced
 
 `GET /subtitles.:ext?from=…&offset=<ms>` already shifts subtitles, which looked like a
@@ -361,7 +377,7 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 3 | `DeviceClient.callAction`, line 89388 | try/catch around the SOAP response parse, null-safe `errorDescription` |
 | 4 | `castingUtils.getVideoInfo`, line 22675 | profile parenthetical after the codec name is optional |
 | 5 | `segmentMiddlewareArgs.video.getFilter`, lines 62954 and 62955 | `-vbsf` becomes `-bsf:v` |
-| 6 | `Casting.prototype.transcode`, line 83062 | DLNA route keeps AC3 as is (stream copy) instead of downmixing to AAC stereo |
+| 6, 15 | `Casting.prototype.transcode` line 83062, `DLNAClient` | keep AC3 as is, but only for devices that report they can decode it |
 | 7 | `Casting.prototype.transcode`, line 83073 | AAC fallback at 192 kbit/s, using AudioToolbox where ffmpeg has it and plain `aac` elsewhere |
 | 8 | `Casting.prototype.transcode`, line 83039 | do not pre-shift the .srt; with `-copyts` the frames keep their original PTS, so shifting desynced burned-in subtitles |
 | 9 | `ensureEventingServer`, lines 89491-89493 | repair the TV's malformed event XML instead of discarding it, restoring transport state updates |

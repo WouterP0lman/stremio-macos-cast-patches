@@ -25,6 +25,8 @@
 #                                        stream overwrote the position you asked for; Chromecast also needs seekTime
 # 14  subtitles chosen automatically   : most torrents ship a matching .srt next to the video; use it,
 #                                        so casting has subtitles without any helper script or internet
+# 15  AC3 only where it is supported    : ask the renderer what it accepts instead of assuming every DLNA TV
+#                                        decodes Dolby Digital, which would leave silent audio on those that do not
 # A Stremio auto-update replaces server.js and removes all of this; just run the script again (or install launchd/).
 set -e
 DIR=$(cd "$(dirname "$0")" && pwd)
@@ -123,7 +125,7 @@ else:
 
 # 6: DLNA route (/casting/transcode.mp4) passes AC3 through; Chromecast (/casting/transcode) keeps AAC stereo
 OLD6 = 'copyAudio = "aac" == audioStream.codec && "stereo" == audioStream.channels)'
-NEW6 = 'copyAudio = "aac" == audioStream.codec && "stereo" == audioStream.channels || /\\.mp4(\\?|$)/i.test(req.originalUrl || req.url) && "ac3" == audioStream.codec)'
+NEW6 = 'copyAudio = "aac" == audioStream.codec && "stereo" == audioStream.channels || "1" === req.query.ac3 && "ac3" == audioStream.codec)'
 PREV6 = 'copyAudio = "aac" == audioStream.codec && "stereo" == audioStream.channels || /\\.mp4$/i.test(req.path) && "ac3" == audioStream.codec)'   # first variant, req.path is undefined in pillarjs/router
 if any(NEW6 in l for l in L): print("patch 6: present")
 else:
@@ -279,6 +281,27 @@ else:
     assert m, "fallback-tak niet herkend"
     L[j] = L[j][:m.start()] + NEWN + L[j][m.end():]
     changed.append("14d"); print("patch 14d: applied (lines %d, %d)" % (i+1, j+1))
+
+# 15: only pass AC3 through to a device that says it can decode it
+OLD15A = 'DLNAClient.prototype.playFromStatus = function() {'
+if any("_canAc3" in l for l in L): print("patch 15: present")
+else:
+    # de vlag meesturen in de transcode-URL
+    i = one(lambda l: "}, proxySrv = this.transcodeURL" in l, "patch 15 (url)")
+    OLD = "audioTrack: this.mediaStatus.audioTrack,"
+    NEW = "audioTrack: this.mediaStatus.audioTrack, ac3: this._canAc3 ? 1 : 0,"
+    at = next(x for x in range(i, i + 8) if OLD in L[x])
+    L[at] = L[at].replace(OLD, NEW, 1)
+    # bij het starten van een cast eenmalig vragen wat het apparaat aankan
+    j = one(lambda l: "DLNAClient.prototype.play = function(srcURL, startAt)" in l, "patch 15 (probe)")
+    k = next(x for x in range(j, j + 6) if "var self = this, wantedAt" in L[x])
+    L[k] = L[k].rstrip() + (' if (self._canAc3 === undefined) { self._canAc3 = false; try { '
+        'self.player.getSupportedProtocols(function (e, protos) { try { '
+        'var txt = (protos || []).map(function (x) { return String(x.contentFormat) + " " + String(x.additionalInfo); })'
+        '.join(" ").toLowerCase(); '
+        'self._canAc3 = /ac-?3|dolby/.test(txt) || /mpeg_ts_(sd|hd)_(na|eu|ko)/.test(txt); } catch (e2) {} }); '
+        '} catch (e) {} }')
+    changed.append(15); print("patch 15: applied (lines %d, %d)" % (at + 1, k + 1))
 
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
