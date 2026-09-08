@@ -46,8 +46,18 @@ SQLite binary is looked up rather than assumed. If either is missing, subtitles 
 inside the torrent still work; only the OpenSubtitles fallback and the language preference
 go quiet.
 
-**Tested on macOS, and on real Linux through `test/linux.sh`.** Windows paths are coded but
-unverified: no Windows machine was available.
+**Tested on macOS, and on real Linux through `test/linux.sh`.**
+
+Windows needed more than a path list. Stremio's Windows shell uses WebView2, not WebKit, so
+its localStorage is a Chromium LevelDB directory rather than a SQLite file, and the SQLite
+route cannot read it at all. `_uiDb()` therefore also recognises a `leveldb` directory, and
+`_scanLevelDb()` pulls the preference straight out of the `.log`/`.ldb` files (they hold the
+values as text between NUL bytes). That scanner is verified against a simulated Chromium
+store; the surrounding paths are not, because no Windows machine was available.
+
+If any of that fails on Windows, the main route is unaffected: subtitles that ship inside
+the torrent need no storage access at all. Only the language preference and the
+OpenSubtitles fallback depend on it.
 
 A Stremio auto-update replaces the whole app bundle and removes the patches. Run the script again afterwards, or install the optional launchd watcher (see below).
 
