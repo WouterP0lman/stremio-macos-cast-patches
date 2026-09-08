@@ -40,11 +40,14 @@ your install lives somewhere else:
 STREMIO_SERVER_JS=/path/to/server.js bash stremio-upnp-patch.sh
 ```
 
-Two runtime details degrade gracefully off macOS rather than failing: the language
-preference and the episode id are read from the web UI's localStorage, whose location is
-probed per platform (`_uiDb()`), and the SQLite binary is looked up rather than assumed. If
-either is missing, subtitles that ship inside the torrent still work; only the
-OpenSubtitles fallback and the language preference go quiet. **Tested on macOS only.**
+Two runtime details are platform dependent: the language preference and the episode id come
+from the web UI's localStorage, whose location is probed per platform (`_uiDb()`), and the
+SQLite binary is looked up rather than assumed. If either is missing, subtitles that ship
+inside the torrent still work; only the OpenSubtitles fallback and the language preference
+go quiet.
+
+**Tested on macOS, and on real Linux through `test/linux.sh`.** Windows paths are coded but
+unverified: no Windows machine was available.
 
 A Stremio auto-update replaces the whole app bundle and removes the patches. Run the script again afterwards, or install the optional launchd watcher (see below).
 
@@ -367,9 +370,14 @@ bash test/verify.sh
 ```
 
 Checks that every patch is present, that the result parses, that the same patches apply
-cleanly to simulated Linux and Windows installs and produce byte-identical output, that
-storage detection works for all three platforms, that a loaded torrent's own subtitle is
-found, and that subtitle shifting clamps at zero. Last run: all green.
+cleanly to Linux and Windows installs and produce byte-identical output, that storage
+detection works for all three platforms, that a loaded torrent's own subtitle is found,
+that subtitle shifting clamps at zero, and (with Docker) that the platform-dependent code
+runs on **real Linux** under the same node 16 Stremio ships. Last run: all green.
+
+That Linux run is not decoration: it caught `userSubtitleLang` searching only macOS paths,
+so the language preference silently came back empty everywhere else. Run it on its own with
+`bash test/linux.sh`. Windows remains simulated, since Windows containers do not run here.
 
 For the casting path itself, `test/fake-dlna-tv.py` presents a renderer to Stremio and
 prints what it receives, so `time` and `subtitles` can be checked without a TV.
@@ -407,6 +415,7 @@ The server is not open source. Three bugs are filed at `Stremio/stremio-bugs`: [
 - `remote/cast-sync.py`: resume where you left off, with subtitles (fallback for unpatched servers)
 - `test/fake-dlna-tv.py`: a fake TV, to verify casting without hardware
 - `test/verify.sh`: runs every check below in one go
+- `test/linux.sh`: runs the platform-dependent code on real Linux in a container
 - `evidence/regex-test.js`: regex unit test
 - `issues/`: the bug reports as filed upstream (#2786, #2787, #2789)
 

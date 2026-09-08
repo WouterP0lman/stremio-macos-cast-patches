@@ -11,6 +11,7 @@
 #   4. storage detection and the language preference work for all three platforms
 #   5. subtitle picking finds the episode's own .srt for a loaded torrent
 #   6. subtitle shifting clamps at zero instead of wrapping around
+#   7. the platform-dependent code runs on real Linux (needs Docker)
 set -u
 DIR=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
@@ -131,6 +132,13 @@ var srt = "1\n00:00:02,000 --> 00:00:04,000\nhello\n";
 var out = shiftSrt(srt, -10000);
 console.log(/00:00:00,000/.test(out) ? "  ok    clamps at zero" : "  FAIL  wraps around: " + out.split("\n")[1]);
 JS
+
+echo "7. real Linux (container)"
+if bash "$DIR/test/linux.sh" 2>&1 | sed 's/^/  /' | grep -q "all good on linux"; then
+  ok "platform code works on real Linux"
+else
+  echo "  skip  docker unavailable or linux check failed (run test/linux.sh for detail)"
+fi
 
 echo
 echo "$PASS passed, $FAIL failed"
