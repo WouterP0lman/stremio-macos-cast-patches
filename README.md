@@ -311,6 +311,31 @@ script running produced:
 `time=371` is the requested 6:11 (patches 11 and 13) and `subtitles` is the episode's own
 .srt, chosen by the server (patch 14). Neither used to be there.
 
+### What leaves your machine, and how to stop it
+
+The subtitle inside the torrent needs no network at all. The fallback does: it sends the
+episode's imdb id, plus the file's OpenSubtitles hash and byte size, to
+`opensubtitles-v3.strem.io`. The hash is computed locally from the first and last 64 KiB;
+no file content is uploaded. That is the same addon Stremio itself queries for subtitles,
+but the server did not use to talk to it, so this is new outbound traffic and you should
+know about it.
+
+`castSubtitles` in `server-settings.json` controls it:
+
+| value | behaviour |
+|---|---|
+| `auto` (default) | torrent's own subtitle first, OpenSubtitles when there is none |
+| `local` | only subtitles that are already in the torrent, never any network |
+| `off` | no automatic subtitle at all |
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"castSubtitles":"local"}' http://127.0.0.1:11470/settings
+```
+
+The key survives restarts and the UI writing its own settings, and shows up in
+`GET /settings`.
+
 ### When the torrent has no subtitle of its own
 
 Plenty of releases ship without one, so `pickSubtitle` falls back to OpenSubtitles, still
