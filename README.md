@@ -160,7 +160,10 @@ OpenSubtitles has) and earlier/later timing in half-second steps. It polls the
 device every two seconds and pauses polling right after a command, because every
 change restarts the stream.
 
-### `remote/cast-sync.py` - start where you left off, with subtitles
+### `remote/cast-sync.py` - fallback, no longer the recommended route
+
+Patch 13 makes a cast start where you left off and patch 14 gives it subtitles, both inside
+the server, so this is only needed if you would rather not patch. It still works.
 
 Casting always begins at 0 with no subtitles. `DLNAClient.play` reset `time` to
 zero unconditionally; patch 11 changes that, so a request carrying `time`
@@ -207,6 +210,52 @@ device's own position again (which patch 9 made possible), overwriting the
 requested one. Send them as two commands a few seconds apart; `cast-sync.py`
 already does that.
 
+## Patch 14: subtitles without a helper, without the internet
+
+The Stremio UI never sends a subtitle when casting. Confirmed three ways: the recorded
+requests only ever carry `{source, time}`; the literal `subtitlesSrc` does not occur in the
+deployed web.stremio.com bundle; and upstream `stremio-core` has no subtitle field in
+`PlayOnDeviceArgs`. On top of that `play()` nulls `subtitlesSrc` on every cast (line 89057
+for DLNA, 87006 for Chromecast), so anything set earlier is wiped.
+
+The fix needs no network. Season torrents usually ship a subtitle file next to every
+episode:
+
+```
+[7] Landman.S01E04.1080p.AMZN-[y2flix.cc].mp4   646 MB
+[8] Landman.S01E04.1080p.AMZN-[y2flix.cc].srt    60 KB
+```
+
+That file belongs to exactly this release, so it is in sync by construction, where a
+subtitle fetched by imdb id is a guess about a release you may not have. It is already
+served at `http://127.0.0.1:11470/<infoHash>/<index>`, and the server's own
+`/subtitles.srt?from=…` parses it.
+
+`castingUtils.pickSubtitle(srcURL)` reads the infoHash and file index from the stream URL,
+asks EngineFS for the file list in-process, and matches on the name stem: an exact match
+(`film.srt`) wins, a language-tagged one (`film.eng.srt`) is scored against your preferred
+language. Both `play()` methods call it and set `subtitlesSrc` before the device loads.
+Any failure returns `null`, so casting always proceeds.
+
+The language preference comes from Stremio itself: the web UI stores
+`profile.settings.subtitlesLanguage` and `subtitlesAutoSelect` in localStorage, a SQLite
+file under `~/Library/WebKit/com.westbridge.stremio5-mac/` on macOS. Node 16 in the bundle
+has no SQLite, but the bundle can `require("child_process")` and macOS ships
+`/usr/bin/sqlite3`, so it is read with `file:…?mode=ro` while Stremio has the file open,
+then cached for five minutes. It is only consulted when a torrent offers more than one
+language, so the common case does no I/O: measured at 0 ms.
+
+Measured end to end: casting at 6:11 produced
+`ffmpeg -ss 371 … -vf subtitles=/var/…/subs-….srt`, and the frame at 6:14 shows the burned-in
+line "- Have a seat. / - I'm fine." with no helper script running.
+
+### Why patch 10 was kept rather than replaced
+
+`GET /subtitles.:ext?from=…&offset=<ms>` already shifts subtitles, which looked like a
+chance to drop the custom shifter from patch 10. Measured first, and it underflows: an
+offset of -5000 ms turns a cue at `00:00:02,136` into `23:59:57,136` instead of clamping at
+zero. Patch 10 clamps, so it stays.
+
 ## Smaller findings
 
 - `-vbsf` was removed in ffmpeg 7. The legacy HLSv1 DLNA MPEG-TS route (`segmentApi.DLNAMpegTtsMiddleware`) passes `-vbsf h264_mp4toannexb` and exits with code 8. Not on the Stremio 5 cast path. Patch 5 changes it to `-bsf:v`.
@@ -232,6 +281,9 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 9 | `ensureEventingServer`, lines 89491-89493 | repair the TV's malformed event XML instead of discarding it, restoring transport state updates |
 | 10 | `Casting.prototype.makeSubs`, lines 83000-83015 | shift the .srt text in JS instead of `ffmpeg -ss`, so subtitle delay (earlier/later) actually works |
 | 11 | `Player.prototype.middleware` line 42227, both `play()` methods | a cast keeps the position the request carries instead of forcing 0 |
+| 12 | `_updateStatusField`, line 89000 | do not add `seekTime` to a position the renderer already reports absolutely |
+| 13 | dispatch line 42227 plus both `play()` methods | the requested start position survives the ffmpeg probe that runs before the device loads |
+| 14 | `castingUtils` line 22632, both `play()` methods | pick a subtitle automatically: season torrents ship a matching .srt next to each episode |
 
 Editing a file inside the bundle breaks the code signature seal. The script re-signs the app ad hoc with `--preserve-metadata=entitlements,flags,identifier`, so the hardened runtime flag and entitlements stay. The Developer ID signature and notarization ticket no longer apply to the modified bundle. The app launches normally on macOS 26.5.1 after this. Backups of the original `server.js` and `_CodeSignature` are written to `backups/<timestamp>/` before every change.
 
