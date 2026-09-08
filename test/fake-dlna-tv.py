@@ -30,6 +30,10 @@ Options:
   --broken-xml   echo the cast URL back in an event with unescaped '&' plus a
                  trailing NUL byte, the way an LG 42LM760S does. Without patches
                  1, 3 and 9 that kills the streaming server; with them it survives.
+  --relative     report position as time since Play instead of the point in the
+                 film, the way some renderers do. The server has to land on the
+                 same absolute position either way.
+  --state-file F write what the TV was told to F as JSON, for automated tests
   --port N       HTTP port (default 47000)
 
 Each run uses a fresh device id, because Stremio caches a device's service
@@ -39,6 +43,10 @@ import http.server, socket, socketserver, struct, sys, threading, time, urllib.p
 
 PORT = 47000
 BROKEN = "--broken-xml" in sys.argv
+RELATIVE = "--relative" in sys.argv          # report time since play, not the absolute point
+STATE_FILE = None
+if "--state-file" in sys.argv:
+    STATE_FILE = sys.argv[sys.argv.index("--state-file") + 1]
 if "--port" in sys.argv:
     PORT = int(sys.argv[sys.argv.index("--port") + 1])
 import os as _os
@@ -150,6 +158,22 @@ def envelope(action, service, inner):
             f'<u:{action}Response xmlns:u="{service}">{inner}</u:{action}Response></s:Body></s:Envelope>')
 
 
+def _save():
+    """Write what the TV has been told, so an automated test can assert on it."""
+    if not STATE_FILE:
+        return
+    import json
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"uri": state.get("uri"), "transport": state.get("transport"),
+                       "position": state.get("position"),
+                       "relative": RELATIVE,
+                       "events": [[n, {k: v[0] for k, v in q.items()}] for n, q in state["events"]]},
+                      fh, indent=1)
+    except Exception:
+        pass
+
+
 def hms(sec):
     sec = int(sec)
     return f"{sec // 3600:02d}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
@@ -240,13 +264,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     v = q[k][0]
                     print(f"      {k:15s} = {(v[:70] + '…') if len(v) > 70 else (v or '(empty)')}")
             state["events"].append(("SetAVTransportURI", q))
+            _save()
             return self._send(envelope(action, svc, ""))
 
         if action == "Play":
             state["transport"] = "PLAYING"; state["started"] = time.time()
             q = urllib.parse.parse_qs(urllib.parse.urlparse(state["uri"]).query, keep_blank_values=True)
-            state["position"] = int(q.get("time", ["0"])[0] or 0)
+            state["position"] = float(q.get("time", ["0"])[0] or 0)
             print(f"  [fake tv] Play, starting at {hms(state['position'])}")
+            _save()
             return self._send(envelope(action, svc, ""))
 
         if action in ("Stop", "Pause"):
@@ -260,7 +286,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "<CurrentTransportStatus>OK</CurrentTransportStatus><CurrentSpeed>1</CurrentSpeed>"))
 
         if action == "GetPositionInfo":
-            pos = state["position"] + (time.time() - state["started"] if state["transport"] == "PLAYING" else 0)
+            elapsed = time.time() - state["started"] if state["transport"] == "PLAYING" else 0
+            # An absolute renderer answers with the point in the film; a relative one
+            # answers with how long it has been playing. Both exist in the wild, and
+            # the server has to end up at the same place either way.
+            pos = elapsed if RELATIVE else state["position"] + elapsed
             return self._send(envelope(action, svc,
                 f"<Track>1</Track><TrackDuration>00:54:28</TrackDuration><TrackMetaData></TrackMetaData>"
                 f"<TrackURI>{state['uri']}</TrackURI><RelTime>{hms(pos)}</RelTime>"
@@ -289,41 +319,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
 import http.client  # noqa: E402  (needed by _send_broken_event)
 
 
-def stremio_port():
+def stremio_socket():
     """Stremio's SSDP client binds a random UDP port and never listens on 1900,
     so announcements can be delivered to it directly. That also sidesteps other
-    software (Spotify, printers) holding 1900 exclusively."""
+    software (Spotify, printers) holding 1900 exclusively.
+
+    Returns (host, port). The host matters: the socket is usually bound to the
+    LAN address rather than to every address, and a datagram sent to 127.0.0.1
+    then never reaches it."""
     import subprocess
     try:
         pid = subprocess.run(["pgrep", "-f", "MacOS/node /Applications/Stremio.app/Contents/MacOS/server.js"],
                              capture_output=True, text=True).stdout.split()[0]
         out = subprocess.run(["lsof", "-nP", "-p", pid], capture_output=True, text=True).stdout
         for l in out.splitlines():
-            if "UDP" in l:
-                addr = l.split()[-1]
-                if ":" in addr and not addr.endswith(":5353"):
-                    return int(addr.split(":")[-1])
+            if "UDP" not in l:
+                continue
+            addr = l.split()[-1]
+            if ":" not in addr or addr.endswith(":5353"):
+                continue
+            host, _, port = addr.rpartition(":")
+            return ("127.0.0.1" if host in ("*", "") else host), int(port)
     except Exception:
         pass
-    return None
+    return None, None
 
 
 def direct_announcer(stop):
     """Push our SSDP reply straight at Stremio's discovery socket."""
     types = ["urn:schemas-upnp-org:device:MediaRenderer:1", "upnp:rootdevice", UDN]
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    told = False
+    told = None
     while not stop.is_set():
-        port = stremio_port()
+        host, port = stremio_socket()
         if port:
-            if not told:
-                print(f"  [ssdp] announcing straight to Stremio on port {port}")
-                told = True
+            if told != (host, port):
+                print(f"  [ssdp] announcing straight to Stremio on {host}:{port}")
+                told = (host, port)
             for t in types:
                 msg = (f"HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\n"
                        f"LOCATION: {BASE}/desc.xml\r\nST: {t}\r\nUSN: {UDN}::{t}\r\n"
                        f"SERVER: Darwin/1.0 UPnP/1.0 FakeTV/1.0\r\n\r\n")
-                try: s.sendto(msg.encode(), ("127.0.0.1", port))
+                try: s.sendto(msg.encode(), (host, port))
                 except Exception: pass
         stop.wait(5)
     s.close()

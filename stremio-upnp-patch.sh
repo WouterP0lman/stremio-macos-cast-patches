@@ -153,7 +153,7 @@ if any(NEW7 in l for l in L): print("patch 7: present")
 elif any(BAD7 in l for l in L):
     i = one(lambda l: BAD7 in l, "patch 7 repair")
     L[i] = L[i].replace(BAD7, 'castingUtils.aacEncoder(ffmpegPath)', 1)
-    changed.append(7); print("patch 7: repaired an earlier broken version (line %d)" % (i+1))
+    changed.append(7); print("patch 7: applied, replacing an earlier broken version (line %d)" % (i+1))
 else:
     i = one(lambda l: OLD7 in l and "copyAudio ?" in l, "patch 7"); L[i] = L[i].replace(OLD7, NEW7, 1)
     changed.append(7); print("patch 7: applied (line %d)" % (i+1))
@@ -240,7 +240,7 @@ elif any(BAD12 in l for l in L):
     k = L[i].index('var _t = 1e3 * parseInt(value, 10), _s = this.seekTime || 0;')
     end = L[i].index('_s + _t);', k) + len('_s + _t);')
     L[i] = L[i][:k] + NEW12 + L[i][end:]
-    changed.append(12); print("patch 12: repaired an earlier version (line %d)" % (i+1))
+    changed.append(12); print("patch 12: applied, replacing an earlier version (line %d)" % (i+1))
 else:
     i = one(lambda l: OLD12 in l, "patch 12"); L[i] = L[i].replace(OLD12, NEW12, 1)
     changed.append(12); print("patch 12: applied (line %d)" % (i+1))

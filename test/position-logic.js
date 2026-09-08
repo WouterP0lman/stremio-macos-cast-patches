@@ -1,31 +1,53 @@
+// Runs the position line straight out of the installed server.js, so what is
+// tested is what casts.
+//
+//   node test/position-logic.js
+//
+// Renderers disagree about what "position" means. An LG answers with the point
+// in the film; others answer with how long they have been playing. Both have to
+// come out at the same place, and a renderer that has not started yet answers 0
+// whichever kind it is, which is the report that must never teach anything.
+var fs = require("fs");
+var S = process.env.STREMIO_SERVER_JS || "/Applications/Stremio.app/Contents/MacOS/server.js";
+var src = fs.readFileSync(S, "utf8");
 
-function make() { return { seekTime: 0, _absTime: undefined, mediaStatus: {} }; }
-function report(dev, seconds) {
-  var value = String(seconds), field = "time";
-  var this_ = dev;
-  (function () { var _t = 1e3 * parseInt(value, 10), _s = this.seekTime || 0; if (_s > 3e4 && this._absTime === undefined) this._absTime = _t >= _s - 5e3; this.mediaStatus[field] = this._absTime === false ? _s + _t : (_t >= _s ? _t : _s + _t); }).call(this_);
-  return dev.mediaStatus.time;
+var START = "var _t = 1e3 * parseInt(value, 10)";
+var at = src.indexOf(START);
+if (at < 0) { console.log("  FAIL  patch 12 is not in " + S); process.exit(1); }
+var end = src.indexOf("this.mediaStatus[field] =", at);
+for (var i = end, depth = 0; i < src.length; i++) {
+  if (src[i] === "(") depth++;
+  else if (src[i] === ")") depth--;
+  else if (src[i] === ";" && depth === 0) { end = i + 1; break; }
 }
+var BODY = src.slice(at, end);
+var run = new Function("value", "field", BODY + " return this.mediaStatus[field];");
+
 var fail = 0;
-function check(name, dev, seek, reports, expected) {
-  dev.seekTime = seek * 1000;
-  var got = null;
-  reports.forEach(function (r) { got = report(dev, r); });
-  var ok = Math.round(got / 1000) === expected;
+function check(name, seek, reports, want) {
+  var dev = { seekTime: seek, _absTime: undefined, mediaStatus: {} };
+  var got = reports.map(function (r) { return run.call(dev, String(r), "time"); });
+  var ok = got.length === want.length && got.every(function (g, i) { return g === want[i]; });
   if (!ok) fail++;
-  console.log("  " + (ok ? "ok   " : "FAIL ") + name + ": " + Math.round(got/1000) + "s (verwacht " + expected + ")");
+  console.log("  " + (ok ? "ok   " : "FAIL ") + name + ": " +
+              got.map(function (g) { return (g / 1000) + "s"; }).join(", ") +
+              (ok ? "" : " (verwacht " + want.map(function (w) { return (w / 1000) + "s"; }).join(", ") + ")"));
 }
-// tv die absolute tijd meldt (zoals de LG met -copyts)
-check("absolute tv, sprong 877s, dan 892", make(), 877, [877, 892], 892);
-// tv die vanaf nul telt, grote sprong: wordt herkend
-check("relatieve tv, sprong 877s, dan 15", make(), 877, [0, 15], 892);
-// korte sprong bij een tv die al herkend is als relatief
-var d = make(); d.seekTime = 877000; report(d, 0); report(d, 15);
-d.seekTime = 5000; var got = report(d, 10);
-var ok = Math.round(got/1000) === 15;
-if (!ok) fail++;
-console.log("  " + (ok ? "ok   " : "FAIL ") + "korte sprong na herkenning: " + Math.round(got/1000) + "s (verwacht 15)");
-// geen sprong
-check("geen sprong, 30s", make(), 0, [30], 30);
-console.log(fail ? "  " + fail + " mislukt" : "  PASS: alle gevallen kloppen, ook het randgeval");
+
+// An LG with -copyts: the stream carries the original timestamps, so the TV
+// answers with the point in the film.
+check("absolute tv na een sprong naar 14:37", 877000, [877, 892], [877000, 892000]);
+// A renderer that counts from the start of what it was handed.
+check("relatieve tv na dezelfde sprong", 877000, [15, 30], [892000, 907000]);
+// What actually happened on the 42LM760S: it answers 0 while still buffering.
+// Reading that as "counts from zero" put every later report 3:25 too far ahead.
+check("tv meldt eerst nul, dan de echte tijd", 205000, [0, 204, 209], [205000, 204000, 209000]);
+check("relatieve tv meldt eerst nul", 205000, [0, 6, 12], [205000, 211000, 217000]);
+// No seek at all.
+check("geen sprong", 0, [30], [30000]);
+// A short seek stays a guess: under 30 seconds the two readings are too close
+// to tell apart, so nothing is learned and nothing is broken.
+check("korte sprong naar 5s", 5000, [10], [10000]);
+
+console.log(fail ? "  " + fail + " mislukt" : "  PASS: elke soort renderer komt op dezelfde plek uit");
 process.exit(fail ? 1 : 0);

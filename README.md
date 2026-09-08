@@ -403,12 +403,12 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 4 | `castingUtils.getVideoInfo`, line 22675 | profile parenthetical after the codec name is optional |
 | 5 | `segmentMiddlewareArgs.video.getFilter`, lines 62954 and 62955 | `-vbsf` becomes `-bsf:v` |
 | 6, 15 | `Casting.prototype.transcode` line 83062, `DLNAClient` | keep AC3 as is, but only for devices that report they can decode it |
-| 7 | `Casting.prototype.transcode`, line 83073 | AAC fallback at 192 kbit/s, using AudioToolbox where ffmpeg has it and plain `aac` elsewhere |
+| 7 | `Casting.prototype.transcode`, line 83073 | AAC fallback at 192 kbit/s, using AudioToolbox where ffmpeg has it and plain `aac` elsewhere, named through the local `ffmpegPath` |
 | 8 | `Casting.prototype.transcode`, line 83039 | do not pre-shift the .srt; with `-copyts` the frames keep their original PTS, so shifting desynced burned-in subtitles |
 | 9 | `ensureEventingServer`, lines 89491-89493 | repair the TV's malformed event XML instead of discarding it, restoring transport state updates |
 | 10 | `Casting.prototype.makeSubs`, lines 83000-83015 | shift the .srt text in JS instead of `ffmpeg -ss`, so subtitle delay (earlier/later) actually works |
 | 11 | `Player.prototype.middleware` line 42227, both `play()` methods | a cast keeps the position the request carries instead of forcing 0 |
-| 12, 16 | `_updateStatusField` line 89000, `DLNAClient.play` | learn per device whether it reports absolute or relative time, instead of guessing |
+| 12, 16 | `_updateStatusField` line 89000, `DLNAClient.play` | learn per device whether it reports absolute or relative time, ignoring the first answers while it is still buffering |
 | 13 | dispatch line 42227 plus both `play()` methods | the requested start position survives the ffmpeg probe that runs before the device loads |
 | 14 | `castingUtils` line 22632, both `play()` methods | pick a subtitle automatically: the torrent's own .srt first, OpenSubtitles as fallback |
 
@@ -420,28 +420,75 @@ Editing a file inside the bundle breaks the code signature seal. The script re-s
 bash test/verify.sh
 ```
 
-Checks that every patch is present, that the result parses, that the same patches apply
-cleanly to Linux and Windows installs and produce byte-identical output, that storage
-detection works for all three platforms, that a loaded torrent's own subtitle is found,
-that subtitle shifting clamps at zero, and (with Docker) that the platform-dependent code
-runs on **real Linux** under the same node 16 Stremio ships. Last run: all green.
+Nine checks: every patch present, the result parses, the same patches apply to Linux and
+Windows installs and produce byte-identical output, storage detection works on all three
+platforms, the shipped subtitle picker chooses the right file, subtitle shifting clamps at
+zero, position reporting is right on both kinds of renderer, a whole cast arrives at a
+renderer, and the platform-dependent code runs on real Linux. Last run: all green.
 
-That Linux run is not decoration. It caught two real bugs:
+Two of those run the real code rather than a copy of it. `test/subtitle-pick.js` and
+`test/position-logic.js` cut the function and the line straight out of the installed
+`server.js` and drive them, because a test that re-implements the logic passes happily
+while the shipped code is broken.
+
+### The tests that caught real bugs
+
+The Linux container run caught two:
 
 - `userSubtitleLang` searched only macOS paths, so the language preference came back empty
   everywhere else;
 - patch 7 hardcoded `aac_at`, Apple's AudioToolbox encoder. It does not exist in a normal
-  ffmpeg build, so on Linux every cast that needed re-encoding produced **zero bytes**. The
-  encoder is now chosen from what the local ffmpeg actually reports: `aac_at` on macOS,
-  plain `aac` elsewhere, both verified.
+  ffmpeg build, so on Linux every cast that needed re-encoding produced **zero bytes**.
 
-Run it on its own with `bash test/linux.sh`. Windows remains simulated, since Windows
-containers do not run here.
+Fixing that second one introduced a worse bug, which the end-to-end test then caught: the
+encoder name was read from `this.executables.ffmpeg` inside a `Promise.all().then()`
+callback, where `this` is undefined. Every cast that re-encodes audio died after 54 bytes,
+on every platform. The name it needs, `ffmpegPath`, is already a local there.
 
-For the casting path itself, `test/fake-dlna-tv.py` presents a renderer to Stremio and
-prints what it receives, so `time` and `subtitles` can be checked without a TV.
+`test/position-logic.js` caught the third, after a cast to a real LG jumped from 3:25 to
+6:49. The renderer answers `GetPositionInfo` with `00:00:00` while it is still buffering.
+Reading that first answer as "this renderer counts from zero" made every later answer land
+a full seek ahead. Nothing is learned from a report under five seconds any more, because at
+that point both kinds of renderer say the same thing.
 
-## Verification
+### `test/cast-e2e.py`: a whole cast, without a TV
+
+Builds a black test film with a subtitle line every five seconds naming the time it belongs
+to, serves it, presents a fake renderer to Stremio, casts to it at 3:25, then adds a
+subtitle the way the interface does, in a second call. It then checks, in the bytes that
+actually reach the renderer:
+
+- the renderer is discovered and told to play at the point that was asked for;
+- the stream itself starts there, so the picture matches the position;
+- nothing is drawn over the picture before a subtitle is asked for;
+- after the subtitle call the film resumes where it was, not a seek further on;
+- the subtitle is burned into the picture (the film is black, so a bright pixel can only be
+  a subtitle: 470 of them appear, and none without);
+- Stremio's own reported position stays in step with the renderer.
+
+All of it runs twice, once against a renderer that reports the point in the film and once
+against one that reports how long it has been playing, because both exist and both have to
+end up in the same place. Skip it with `SKIP_E2E=1`; on its own it takes about two minutes.
+
+### On a real TV
+
+Confirmed on the LG 42LM760S on 8 September 2026, casting the same test film:
+
+```
+Arguments -copyts -ss 205 -i ... -c:v copy -strict -2 -c:a aac_at -b:a 192k -ac 2
+```
+
+The picture is copied through untouched and only the audio is re-encoded, the TV asks for
+`ac3=1` because it reports it can decode Dolby, and after the subtitle call the stream
+resumes at 229s rather than the 409s the old position logic produced. The TV's own
+`GetPositionInfo` then answers `00:04:17` against a `00:05:00` film, which matches.
+
+Two things about this TV that are worth knowing and are not patched: it answers
+`GetTransportInfo` and `GetMediaInfo` with nothing at all, and Stremio never drops a cast
+device that has gone away, so a device list can fill up with renderers that no longer
+exist.
+
+### Evidence from the original diagnosis
 
 - `evidence/regex-test.js`: the patched regex against 13 real ffmpeg 4 and ffmpeg 7 stream lines (mp4, mkv, ts; h264, hevc; aac, ac3, eac3, opus, dts; subtitles; with and without language and `(default)`). Run: `/Applications/Stremio.app/Contents/MacOS/node evidence/regex-test.js`.
 - The exact `getVideoInfo` function extracted from the live bundle, run standalone against the source: before the patch it logs `Cannot parse stream` three times and returns `streams: []`; after the patch it returns the video, audio and subtitle streams with ids, codecs and channel layouts.
@@ -473,6 +520,9 @@ The server is not open source. Three bugs are filed at `Stremio/stremio-bugs`: [
 - `remote/cast-remote.py`: browser remote control (seek, subtitles, timing)
 - `remote/cast-sync.py`: resume where you left off, with subtitles (fallback for unpatched servers)
 - `test/fake-dlna-tv.py`: a fake TV, to verify casting without hardware
+- `test/cast-e2e.py`: casts a real film to that fake TV and checks what arrives
+- `test/subtitle-pick.js`: the shipped subtitle picker against nine torrents
+- `test/position-logic.js`: the shipped position line against both kinds of renderer
 - `test/verify.sh`: runs every check below in one go
 - `test/linux.sh`: runs the platform-dependent code on real Linux in a container
 - `evidence/regex-test.js`: regex unit test

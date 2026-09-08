@@ -12,7 +12,8 @@
 #   5. the shipped subtitle picker chooses the right file, incl. language
 #   6. subtitle shifting clamps at zero instead of wrapping around
 #   7. position reporting is right on absolute and relative renderers
-#   8. the platform-dependent code runs on real Linux (needs Docker)
+#   8. a real cast to a fake renderer: position, audio and subtitle
+#   9. the platform-dependent code runs on real Linux (needs Docker)
 set -u
 DIR=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
@@ -147,7 +148,16 @@ else
   bad "position logic regressed (run test/position-logic.js)"
 fi
 
-echo "8. real Linux (container)"
+echo "8. a whole cast, end to end"
+if [ -n "${SKIP_E2E:-}" ]; then
+  echo "  note  skipped (SKIP_E2E is set)"
+elif OUT=$(python3 "$DIR/test/cast-e2e.py" 2>&1) && echo "$OUT" | grep -q PASS; then
+  ok "video, position and subtitle all arrive at a renderer"
+else
+  bad "the cast chain is broken:"; echo "$OUT" | sed 's/^/      /' | tail -20
+fi
+
+echo "9. real Linux (container)"
 if bash "$DIR/test/linux.sh" 2>&1 | sed 's/^/  /' | grep -q "all good on linux"; then
   ok "platform code works on real Linux"
 else
