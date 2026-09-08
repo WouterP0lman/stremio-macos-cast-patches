@@ -352,7 +352,7 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 4 | `castingUtils.getVideoInfo`, line 22675 | profile parenthetical after the codec name is optional |
 | 5 | `segmentMiddlewareArgs.video.getFilter`, lines 62954 and 62955 | `-vbsf` becomes `-bsf:v` |
 | 6 | `Casting.prototype.transcode`, line 83062 | DLNA route keeps AC3 as is (stream copy) instead of downmixing to AAC stereo |
-| 7 | `Casting.prototype.transcode`, line 83073 | AAC fallback uses `aac_at` (AudioToolbox) at 192 kbit/s instead of native `aac` at ~128 |
+| 7 | `Casting.prototype.transcode`, line 83073 | AAC fallback at 192 kbit/s, using AudioToolbox where ffmpeg has it and plain `aac` elsewhere |
 | 8 | `Casting.prototype.transcode`, line 83039 | do not pre-shift the .srt; with `-copyts` the frames keep their original PTS, so shifting desynced burned-in subtitles |
 | 9 | `ensureEventingServer`, lines 89491-89493 | repair the TV's malformed event XML instead of discarding it, restoring transport state updates |
 | 10 | `Casting.prototype.makeSubs`, lines 83000-83015 | shift the .srt text in JS instead of `ffmpeg -ss`, so subtitle delay (earlier/later) actually works |
@@ -375,9 +375,17 @@ detection works for all three platforms, that a loaded torrent's own subtitle is
 that subtitle shifting clamps at zero, and (with Docker) that the platform-dependent code
 runs on **real Linux** under the same node 16 Stremio ships. Last run: all green.
 
-That Linux run is not decoration: it caught `userSubtitleLang` searching only macOS paths,
-so the language preference silently came back empty everywhere else. Run it on its own with
-`bash test/linux.sh`. Windows remains simulated, since Windows containers do not run here.
+That Linux run is not decoration. It caught two real bugs:
+
+- `userSubtitleLang` searched only macOS paths, so the language preference came back empty
+  everywhere else;
+- patch 7 hardcoded `aac_at`, Apple's AudioToolbox encoder. It does not exist in a normal
+  ffmpeg build, so on Linux every cast that needed re-encoding produced **zero bytes**. The
+  encoder is now chosen from what the local ffmpeg actually reports: `aac_at` on macOS,
+  plain `aac` elsewhere, both verified.
+
+Run it on its own with `bash test/linux.sh`. Windows remains simulated, since Windows
+containers do not run here.
 
 For the casting path itself, `test/fake-dlna-tv.py` presents a renderer to Stremio and
 prints what it receives, so `time` and `subtitles` can be checked without a TV.

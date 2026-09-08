@@ -7,7 +7,9 @@
 # localStorage, extracts castingUtils from the patched server.js, and runs it
 # under node 16 on linux: the same node version Stremio ships.
 #
-# This is what caught userSubtitleLang searching only macOS paths.
+# This caught two real bugs: userSubtitleLang searching only macOS paths, and
+# patch 7 hardcoding Apple's aac_at encoder, which does not exist on Linux and
+# made every re-encoding cast produce zero bytes.
 set -u
 DIR=$(cd "$(dirname "$0")/.." && pwd)
 S=${STREMIO_SERVER_JS:-/Applications/Stremio.app/Contents/MacOS/server.js}
@@ -67,6 +69,7 @@ function check(label, got, want) {
 console.log("  running on " + process.platform + ", node " + process.version);
 check("sqlite found", !!castingUtils._sqlite(), true);
 check("storage found", !!castingUtils._uiDb(), true);
+check("aac encoder choice", castingUtils.aacEncoder("ffmpeg"), "aac");
 castingUtils.userSubtitleLang(function (lang) {
   check("language preference", lang, "nld");
   castingUtils.videoIdFor("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 7, function (vid) {
