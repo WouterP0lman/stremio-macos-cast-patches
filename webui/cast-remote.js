@@ -283,7 +283,8 @@
         'background:rgba(23,20,40,.96);color:#fff;border:1px solid rgba(255,255,255,.14);',
         'border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.5);padding:14px 16px;',
         'backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);user-select:none;',
-        'max-height:calc(100vh - 48px);overflow:auto}',
+        'max-height:calc(100vh - 48px);overflow:auto;transition:bottom .15s ease}',
+        '.panel.above-player{bottom:132px}',
         '.panel.collapsed{padding:10px 14px;width:auto}',
         '.head{display:flex;align-items:center;gap:8px}',
         '.dot{width:8px;height:8px;border-radius:50%;background:#7b5bf5;flex:none}',
@@ -351,7 +352,7 @@
         if (!host.parentNode) document.documentElement.appendChild(host);
 
         if (collapsed) {
-            panel.className = 'panel collapsed';
+            panel.className = 'panel collapsed' + (inPlayer() ? ' above-player' : '');
             panel.innerHTML = '';
             var h = el('div', 'head');
             h.appendChild(el('span', 'dot'));
@@ -361,7 +362,7 @@
             return;
         }
 
-        panel.className = 'panel';
+        panel.className = 'panel' + (inPlayer() ? ' above-player' : '');
         panel.innerHTML = '';
 
         var head = el('div', 'head');
@@ -457,6 +458,12 @@
         panel.appendChild(delayRow);
     }
 
+    /* The player puts its own controls along the bottom, so lift the panel clear of
+     * them while that view is open. */
+    function inPlayer() {
+        return /^#\/player/.test(String(location.hash || ''));
+    }
+
     function el(tag, cls) {
         var e = document.createElement(tag);
         if (cls) e.className = cls;
@@ -478,6 +485,8 @@
         b.addEventListener('click', onClick);
         return b;
     }
+
+    window.addEventListener('hashchange', function () { if (device) render(); });
 
     pollDevice();
     pollState();
