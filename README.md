@@ -350,6 +350,20 @@ Editing a file inside the bundle breaks the code signature seal. The script re-s
 
 ## Verification
 
+```bash
+bash test/verify.sh
+```
+
+Checks that every patch is present, that the result parses, that the same patches apply
+cleanly to simulated Linux and Windows installs and produce byte-identical output, that
+storage detection works for all three platforms, that a loaded torrent's own subtitle is
+found, and that subtitle shifting clamps at zero. Last run: all green.
+
+For the casting path itself, `test/fake-dlna-tv.py` presents a renderer to Stremio and
+prints what it receives, so `time` and `subtitles` can be checked without a TV.
+
+## Verification
+
 - `evidence/regex-test.js`: the patched regex against 13 real ffmpeg 4 and ffmpeg 7 stream lines (mp4, mkv, ts; h264, hevc; aac, ac3, eac3, opus, dts; subtitles; with and without language and `(default)`). Run: `/Applications/Stremio.app/Contents/MacOS/node evidence/regex-test.js`.
 - The exact `getVideoInfo` function extracted from the live bundle, run standalone against the source: before the patch it logs `Cannot parse stream` three times and returns `streams: []`; after the patch it returns the video, audio and subtitle streams with ids, codecs and channel layouts.
 - End to end: `curl` the `/casting/transcode.mp4` endpoint for an h264 + AC3 mp4 and `ffprobe` the output. Before: h264 + vorbis 6ch. After: h264 + aac 2ch.
@@ -380,6 +394,7 @@ The server is not open source. Three bugs are filed at `Stremio/stremio-bugs`: [
 - `remote/cast-remote.py`: browser remote control (seek, subtitles, timing)
 - `remote/cast-sync.py`: resume where you left off, with subtitles (fallback for unpatched servers)
 - `test/fake-dlna-tv.py`: a fake TV, to verify casting without hardware
+- `test/verify.sh`: runs every check below in one go
 - `evidence/regex-test.js`: regex unit test
 - `issues/`: the bug reports as filed upstream (#2786, #2787, #2789)
 
