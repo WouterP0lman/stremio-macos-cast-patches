@@ -249,6 +249,30 @@ Measured end to end: casting at 6:11 produced
 `ffmpeg -ss 371 … -vf subtitles=/var/…/subs-….srt`, and the frame at 6:14 shows the burned-in
 line "- Have a seat. / - I'm fine." with no helper script running.
 
+### When the torrent has no subtitle of its own
+
+Plenty of releases ship without one, so `pickSubtitle` falls back to OpenSubtitles, still
+without asking you anything. The episode id does not have to be guessed from the file name:
+the web UI already stores the mapping, keyed by infoHash and file index:
+
+```json
+{"metaId": "tt14186672", "videoId": "tt14186672:1:4"}
+  -> {"stream": {"infoHash": "a34dcf59…", "fileIdx": 7}}
+```
+
+With the id in hand the server computes the OpenSubtitles hash of the file through its own
+`/opensubHash` endpoint (which reads only the first and last 64 KiB, asking the torrent
+engine to prioritise those pieces) and passes it to the addon as `videoHash`/`videoSize`.
+A result marked `m: "h"` is a hash match, meaning it belongs to this exact file rather than
+to some other release of the same episode; those are preferred over the imdb-level guesses.
+
+Everything is bounded: 9 seconds per request and 12 seconds for the whole fallback, after
+which casting proceeds without subtitles rather than hanging. Measured on a warm torrent:
+318 ms end to end.
+
+Storage locations are probed per platform (macOS paths are the tested ones; Windows and
+Linux candidates are in `_uiDb()` but unverified).
+
 ### Why patch 10 was kept rather than replaced
 
 `GET /subtitles.:ext?from=…&offset=<ms>` already shifts subtitles, which looked like a
@@ -283,7 +307,7 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 11 | `Player.prototype.middleware` line 42227, both `play()` methods | a cast keeps the position the request carries instead of forcing 0 |
 | 12 | `_updateStatusField`, line 89000 | do not add `seekTime` to a position the renderer already reports absolutely |
 | 13 | dispatch line 42227 plus both `play()` methods | the requested start position survives the ffmpeg probe that runs before the device loads |
-| 14 | `castingUtils` line 22632, both `play()` methods | pick a subtitle automatically: season torrents ship a matching .srt next to each episode |
+| 14 | `castingUtils` line 22632, both `play()` methods | pick a subtitle automatically: the torrent's own .srt first, OpenSubtitles as fallback |
 
 Editing a file inside the bundle breaks the code signature seal. The script re-signs the app ad hoc with `--preserve-metadata=entitlements,flags,identifier`, so the hardened runtime flag and entitlements stay. The Developer ID signature and notarization ticket no longer apply to the modified bundle. The app launches normally on macOS 26.5.1 after this. Backups of the original `server.js` and `_CodeSignature` are written to `backups/<timestamp>/` before every change.
 
