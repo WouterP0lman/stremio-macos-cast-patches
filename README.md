@@ -12,8 +12,20 @@ Tested on an LG 42LM760S (2012, NetCast DLNA renderer) and a Chromecast 3rd gen,
 ```bash
 git clone https://github.com/WouterP0lman/stremio-macos-cast-patches.git
 cd stremio-macos-cast-patches
-bash stremio-upnp-patch.sh          # stops Stremio, backs up, patches, re-signs, relaunches
-DRY=1 bash stremio-upnp-patch.sh    # only report which patches are missing
+bash install.sh
+```
+
+That finds Stremio, backs up, patches, verifies, and tells you how to keep the patches
+across Stremio updates (an update replaces `server.js` and removes them silently, which is
+the single most likely way this stops working). `bash install.sh --uninstall` puts the
+original back.
+
+Individual steps, if you would rather drive them yourself:
+
+```bash
+bash stremio-upnp-patch.sh          # patch
+DRY=1 bash stremio-upnp-patch.sh    # report only
+bash test/verify.sh                 # check everything
 ```
 
 ### Other platforms
