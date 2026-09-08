@@ -153,7 +153,7 @@ def current_file():
     return None, None
 
 
-def sync_once(dev, lang, want_subs, dry, min_seconds=30):
+def sync_once(dev, lang, want_subs, dry, min_seconds=30, seek=True):
     st = state_of(dev)
     src = st.get("source")
     if not src:
@@ -203,21 +203,37 @@ def sync_once(dev, lang, want_subs, dry, min_seconds=30):
     elif st.get("subtitlesSrc"):
         print("  subtitles already on")
 
-    if exact and secs >= min_seconds:
+    live = int(st.get("time") or 0) // 1000
+    if not seek:
+        print(f"  already playing at {live // 60}:{live % 60:02d}, not moving it")
+    elif exact and secs >= min_seconds and live < 30:
         print(f"  jumping to {secs // 60}:{secs % 60:02d}")
         send(dev, {"time": entry["time"]}, dry)
         did = True
+    elif exact and live >= 30:
+        print(f"  already playing at {live // 60}:{live % 60:02d}, leaving the position alone")
     elif exact:
-        print("  position is near the start, leaving it alone")
+        print("  stored position is near the start, leaving it alone")
     return did
+
+
+def load_config():
+    """Optional remote/config.json next to this script; flags win over it."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def main():
     args = sys.argv[1:]
+    cfg = load_config()
     dry = "--dry" in args
     once = "--once" in args
-    want_subs = "--no-subs" not in args
-    lang = "eng"
+    want_subs = cfg.get("subtitles", True) and "--no-subs" not in args
+    lang = cfg.get("language", "eng")
     if "--lang" in args:
         i = args.index("--lang")
         if i + 1 < len(args): lang = args[i + 1]
@@ -247,9 +263,9 @@ def main():
             if src and src != last_src:
                 last_src = src
                 handled.discard(src)
-            if src and src not in handled and pos < 15000 and st.get("realStatus") in ("PLAYING", "TRANSITIONING"):
+            if src and src not in handled and st.get("realStatus") in ("PLAYING", "TRANSITIONING"):
                 print(f"\nnew cast detected at {pos // 1000}s")
-                if sync_once(dev, lang, want_subs, dry):
+                if sync_once(dev, lang, want_subs, dry, seek=(pos < 15000)):
                     handled.add(src)
                     time.sleep(20)
         except Exception:

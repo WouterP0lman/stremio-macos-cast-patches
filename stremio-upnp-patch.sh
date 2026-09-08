@@ -19,6 +19,12 @@
 #  9  repair TV event XML                : LG echoes our cast URL with unescaped '&' plus a trailing NUL byte, so every UPnP
 #                                        status event was unparseable; repair instead of discard, restoring transport state
 # 11  cast keeps your position         : play() no longer forces time=0, so a cast can start where you were
+# 12  no double-counted position       : ffmpeg uses -copyts so the renderer already reports absolute time;
+#                                        adding seekTime on top made the position jump ahead after every seek
+# 13  requested position survives      : the ffmpeg probe in play() left a window where the still-playing old
+#                                        stream overwrote the position you asked for; Chromecast also needs seekTime
+# 14  subtitles chosen automatically   : most torrents ship a matching .srt next to the video; use it,
+#                                        so casting has subtitles without any helper script or internet
 # A Stremio auto-update replaces server.js and removes all of this; just run the script again (or install launchd/).
 set -e
 APP=/Applications/Stremio.app
@@ -165,6 +171,66 @@ else:
         k = next(x for x in range(j, j + 4) if TIME0 in L[x])
         L[k] = L[k].replace(TIME0, TIMEN, 1)
     changed.append(11); print("patch 11: applied (line %d plus both play methods)" % (i+1))
+
+# 12: position from a DLNA renderer is not double counted after a seek
+OLD12 = 'this.mediaStatus[field] = this.seekTime + 1e3 * parseInt(value, 10);'
+NEW12 = ('this.mediaStatus[field] = (function (t, s) { return t >= s ? t : s + t; })'
+         '(1e3 * parseInt(value, 10), this.seekTime || 0);')
+if any(NEW12 in l for l in L): print("patch 12: present")
+else:
+    i = one(lambda l: OLD12 in l, "patch 12"); L[i] = L[i].replace(OLD12, NEW12, 1)
+    changed.append(12); print("patch 12: applied (line %d)" % (i+1))
+
+# 13: the requested start position survives the probe that runs before the device is loaded
+OLD13A = 'var self = this;\n        return castingUtils.getVideoInfo(this.executables.ffmpeg, srcURL).then((function(info) {'
+NEW13A = 'var self = this, wantedAt = this.mediaStatus.time;\n        return castingUtils.getVideoInfo(this.executables.ffmpeg, srcURL).then((function(info) {'
+OLD13B = 'self.mediaStatus.length = 1e3 * info.duration, self.delayedPlayFromStatus();'
+NEW13B = 'self.mediaStatus.length = 1e3 * info.duration, self.mediaStatus.time = wantedAt, self.delayedPlayFromStatus();'
+OLD13C = 'this.seekTime = 0, this.mediaStatus.source = srcURL, this.mediaStatus.time = parseInt(startAt, 10) || 0,'
+NEW13C = 'this.seekTime = (parseInt(startAt, 10) || 0) / 1e3, this.mediaStatus.source = srcURL, this.mediaStatus.time = parseInt(startAt, 10) || 0,'
+if any("wantedAt" in l for l in L): print("patch 13: present")
+else:
+    i = one(lambda l: 'var self = this;' == l.strip() and "DLNAClient" not in l, "patch 13 (marker)") if False else None
+    # DLNA: bewaar de gevraagde tijd voordat de ffmpeg-probe draait
+    d = one(lambda l: "DLNAClient.prototype.play = function(srcURL, startAt)" in l, "patch 13 (dlna play)")
+    j = next(k for k in range(d, d + 6) if L[k].strip() == "var self = this;")
+    L[j] = L[j].replace("var self = this;", "var self = this, wantedAt = this.mediaStatus.time;", 1)
+    k = next(x for x in range(j, j + 10) if OLD13B in L[x])
+    L[k] = L[k].replace(OLD13B, NEW13B, 1)
+    # Chromecast: seekTime (in seconden) bepaalt daar de startpositie, niet mediaStatus.time
+    c = one(lambda l: OLD13C in l, "patch 13 (chromecast play)")
+    L[c] = L[c].replace(OLD13C, NEW13C, 1)
+    changed.append(13); print("patch 13: applied (lines %d, %d, %d)" % (j+1, k+1, c+1))
+
+# 14: pick a subtitle automatically when casting; the file usually sits in the same torrent
+PICK = 'pickSubtitle: function (srcURL) { return new Promise(function (resolve) { try { var m = String(srcURL || "").match(/\\/([0-9a-f]{40})\\/(\\d+)/); if (!m) return resolve(null); var ih = m[1], idx = parseInt(m[2], 10), efs = __webpack_require__(172); var stem = function (n) { return String(n).replace(/^.*[\\/\\\\]/, "").replace(/\\.[^.]+$/, "").toLowerCase(); }; var vid = efs.getFilename(ih, idx); if (!vid) return resolve(null); var want = stem(vid), hits = []; for (var i = 0; i < 500; i++) { var n = efs.getFilename(ih, i); if (!n) break; if (i === idx || !/\\.(srt|ass|ssa|sub|vtt)$/i.test(n)) continue; var b = stem(n); if (b === want) { hits.push({ i: i, tag: "" }); } else if (b.indexOf(want + ".") === 0) { hits.push({ i: i, tag: b.slice(want.length + 1) }); } } if (!hits.length) return resolve(null); var done = function (h) { resolve({ index: h.i, url: "http://127.0.0.1:11470/" + ih + "/" + h.i, name: efs.getFilename(ih, h.i) }); }; var exact = hits.filter(function (h) { return !h.tag; }); if (hits.length === 1 || (exact.length && hits.length === exact.length)) return done(exact[0] || hits[0]); castingUtils.userSubtitleLang(function (lang) { var L = { eng: ["en", "eng", "english"], nld: ["nl", "nld", "dut", "dutch"], ger: ["de", "ger", "deu", "german"], fre: ["fr", "fre", "fra", "french"], spa: ["es", "spa", "spanish"], por: ["pt", "por", "portuguese"], ita: ["it", "ita", "italian"], pol: ["pl", "pol", "polish"] }, l = String(lang || "").toLowerCase(), tags = L[l] || [l]; for (var k in L) { if (L[k].indexOf(l) >= 0) { tags = L[k]; break; } } var byLang = hits.filter(function (h) { return tags.indexOf(h.tag) >= 0; }); done(byLang[0] || exact[0] || hits[0]); }); } catch (e) { console.error("[patch] pickSubtitle:", e && e.message); resolve(null); } }); }, userSubtitleLang: function (cb) { var self = castingUtils; if (self._langAt && Date.now() - self._langAt < 3e5) return cb(self._lang); try { var os = __webpack_require__(22), fs2 = __webpack_require__(1), path2 = __webpack_require__(5); var roots = [path2.join(os.homedir(), "Library/WebKit/com.westbridge.stremio5-mac/WebsiteData/Default"), path2.join(os.homedir(), "Library/WebKit/com.stremio.stremio-shell-macos/WebsiteData/Default")]; var db = null, walk = function (d, depth) { if (db || depth > 3) return; var ls = []; try { ls = fs2.readdirSync(d); } catch (e) { return; } ls.forEach(function (f) { if (db) return; var full = path2.join(d, f); if (f === "localstorage.sqlite3") { db = full; return; } try { if (fs2.statSync(full).isDirectory()) walk(full, depth + 1); } catch (e) {} }); }; roots.forEach(function (r) { walk(r, 0); }); if (!db) { self._lang = null, self._langAt = Date.now(); return cb(null); } child.execFile("/usr/bin/sqlite3", ["file:" + db + "?mode=ro", "SELECT hex(value) FROM ItemTable WHERE key=\'profile\';"], { timeout: 4e3, maxBuffer: 33554432 }, function (err, out) { var lang = null; try { if (!err && out.trim()) { var prof = JSON.parse(Buffer.from(out.trim(), "hex").toString("utf16le")), st = prof.settings || {}; if (!1 !== st.subtitlesAutoSelect) lang = st.subtitlesLanguage || null; } } catch (e) {} self._lang = lang, self._langAt = Date.now(); cb(lang); }); } catch (e) { self._lang = null, self._langAt = Date.now(); cb(null); } }, '
+if any("pickSubtitle: function" in l for l in L): print("patch 14a: present")
+else:
+    i = one(lambda l: l.strip().startswith("getMime: function(mimeURL)"), "patch 14a")
+    ind = L[i][: len(L[i]) - len(L[i].lstrip())]
+    L[i] = ind + PICK + "\n" + L[i]
+    changed.append("14a"); print("patch 14a: applied (line %d)" % (i+1))
+
+# 14b/14c: use it in play(), after the line that nulls subtitlesSrc
+OLD14B = 'self.mediaStatus.length = 1e3 * info.duration, self.mediaStatus.time = wantedAt, self.delayedPlayFromStatus();'
+NEW14B = ('self.mediaStatus.length = 1e3 * info.duration, self.mediaStatus.time = wantedAt, '
+          'castingUtils.pickSubtitle(srcURL).then(function (sub) { '
+          'sub && !self.mediaStatus.subtitlesSrc && (self.mediaStatus.subtitlesSrc = sub.url); '
+          'self.delayedPlayFromStatus(); });')
+if any("pickSubtitle(srcURL)" in l and "delayedPlayFromStatus" in l for l in L): print("patch 14b: present")
+else:
+    i = one(lambda l: OLD14B in l, "patch 14b"); L[i] = L[i].replace(OLD14B, NEW14B, 1)
+    changed.append("14b"); print("patch 14b: applied (line %d)" % (i+1))
+
+# Chromecast: dezelfde haak, maar de lookup moet af zijn voordat playFromStatus draait
+OLD14C = 'self.stateFlags = 0, self.status().then((function(status) {'
+NEW14C = ('self.stateFlags = 0, castingUtils.pickSubtitle(srcURL).then(function (sub) { '
+          'sub && !self.mediaStatus.subtitlesSrc && (self.mediaStatus.subtitlesSrc = sub.url); }), '
+          'self.status().then((function(status) {')
+if any("pickSubtitle(srcURL)" in l and "self.status()" in l for l in L): print("patch 14c: present")
+else:
+    i = one(lambda l: OLD14C in l, "patch 14c"); L[i] = L[i].replace(OLD14C, NEW14C, 1)
+    changed.append("14c"); print("patch 14c: applied (line %d)" % (i+1))
 
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
