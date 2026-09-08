@@ -249,6 +249,25 @@ Measured end to end: casting at 6:11 produced
 `ffmpeg -ss 371 … -vf subtitles=/var/…/subs-….srt`, and the frame at 6:14 shows the burned-in
 line "- Have a seat. / - I'm fine." with no helper script running.
 
+### Proof that the server does this by itself
+
+`test/fake-dlna-tv.py` presents a UPnP MediaRenderer to Stremio and prints what it is sent,
+so the whole path can be checked without a TV in the room. Casting at 6:11 with no helper
+script running produced:
+
+```
+[fake tv] SetAVTransportURI
+    video          = http://localhost:11470/a34dcf59…/7?
+    time           = 371
+    audioTrack     = 0:1
+    subtitles      = http://127.0.0.1:11470/a34dcf59…/8
+    subtitlesDelay = 0
+[fake tv] Play, starting at 00:06:11
+```
+
+`time=371` is the requested 6:11 (patches 11 and 13) and `subtitles` is the episode's own
+.srt, chosen by the server (patch 14). Neither used to be there.
+
 ### When the torrent has no subtitle of its own
 
 Plenty of releases ship without one, so `pickSubtitle` falls back to OpenSubtitles, still
@@ -341,7 +360,8 @@ The server is not open source. Three bugs are filed at `Stremio/stremio-bugs`: [
 - `launchd/`: optional re-patch watcher for after auto-updates
 - `cast-subs.py`: turn subtitles on for a running cast
 - `remote/cast-remote.py`: browser remote control (seek, subtitles, timing)
-- `remote/cast-sync.py`: resume where you left off, with subtitles
+- `remote/cast-sync.py`: resume where you left off, with subtitles (fallback for unpatched servers)
+- `test/fake-dlna-tv.py`: a fake TV, to verify casting without hardware
 - `evidence/regex-test.js`: regex unit test
 - `issues/`: the bug reports as filed upstream (#2786, #2787, #2789)
 
