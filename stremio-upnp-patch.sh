@@ -336,32 +336,52 @@ else:
         '} catch (e) {} }')
     changed.append(15); print("patch 15: applied (lines %d, %d)" % (at + 1, k + 1))
 
-# 19: keep the reported position of a DLNA renderer up to date.
-# The server only learns where a TV is from UPnP events, and most renderers send
-# those on state changes rather than while playing, so the position sits still for
-# the whole film. Refresh it while something is playing, at most every two seconds,
-# without making the status request wait for a renderer that answers slowly.
-OLD19 = 'DLNAClient.prototype.status = function() {\n        return Promise.resolve(this.mediaStatus);\n    }'
-NEW19 = ('DLNAClient.prototype.status = function() {\n'
+# 22: asking a TV how it is doing must never hold up the answer.
+# init() waits for GetPositionInfo and GetVolume before the first status can be
+# returned. On a renderer that does not answer, that is the whole timeout, twice,
+# and until then the panel has nothing to show and every button is pointless. Let
+# it answer straight away and fold the volume in when it arrives.
+#
+# The position is deliberately not asked for here. A device that is idle answers 0,
+# and that 0 lands in mediaStatus before the cast that was just requested has been
+# set up, so the film starts from the beginning and every later jump counts from
+# there. Where the film should start is what the request said, not what the TV
+# happened to be showing a moment earlier.
+OLD22 = ('DLNAClient.prototype.init = function() {\n'
          '        var self = this;\n'
-         '        if (this.mediaStatus.source && !this._posBusy && Date.now() - (this._posAt || 0) > 2e3) {\n'
-         '            this._posBusy = true;\n'
-         '            Promise.resolve(this.player.getPositionAsync()).then(function (pos) {\n'
-         '                self._posBusy = false; self._posAt = Date.now();\n'
-         '                if (pos !== null && pos !== undefined) self._updateStatus({ CurrentTrackPosition: pos });\n'
-         '            }).catch(function () { self._posBusy = false; self._posAt = Date.now(); });\n'
-         '        }\n'
-         '        return Promise.resolve(this.mediaStatus);\n    }')
-if any("_posBusy" in l for l in L): print("patch 19: present")
+         '        return Promise.all([ this.player.getPositionAsync(), this.player.getVolumeAsync() ]).then((function(res) {')
+NEW22 = ('DLNAClient.prototype.init = function() {\n'
+         '        var self = this;\n'
+         '        Promise.resolve(this.player.getVolumeAsync()).then((function(vol) {\n'
+         '            self._updateStatus({ CurrentVolume: vol });\n'
+         '        })).catch(function () {});\n'
+         '        return Promise.resolve(this.mediaStatus);\n'
+         '    }, DLNAClient.prototype._initSlow = function() {\n'
+         '        var self = this;\n'
+         '        return Promise.all([ this.player.getPositionAsync(), this.player.getVolumeAsync() ]).then((function(res) {')
+if any("_initSlow" in l for l in L): print("patch 22: present")
 else:
-    # L holds lines without their newlines, so rejoin with them to match a
-    # multi-line anchor, then split the same way again.
     whole = "\n".join(L)
-    if OLD19 not in whole: raise SystemExit("patch 19: anchor not found")
-    idx = whole.index(OLD19)
-    upto = whole[:idx].count("\n")
-    L[:] = whole.replace(OLD19, NEW19, 1).split("\n")
-    changed.append(19); print("patch 19: applied (line %d)" % (upto + 1))
+    if OLD22 not in whole: raise SystemExit("patch 22: anchor not found")
+    upto = whole[:whole.index(OLD22)].count("\n")
+    L[:] = whole.replace(OLD22, NEW22, 1).split("\n")
+    changed.append(22); print("patch 22: applied (line %d)" % (upto + 1))
+
+# 20: give UPnP calls a deadline.
+# callAction opens an http request with no timeout at all, so a renderer that goes
+# quiet leaves the call hanging for good. On an LG 42LM760S that is not theoretical:
+# GetTransportInfo never answers. When the hanging call is the stopAsync inside
+# playFromStatus, the load that follows it never runs and a seek silently does
+# nothing; press enough buttons and the pending sockets pile up until the server
+# stops responding. Six seconds is generous for a device on the same network.
+OLD20 = 'req.on("error", callback), req.end(xml);'
+NEW20 = ('req.on("error", callback), req.setTimeout(6e3, function () { '
+         'var e20 = new Error("UPnP action " + actionName + " timed out"); e20.code = "ETIMEDOUT"; '
+         'console.error("[patch] " + e20.message); req.destroy(e20); }), req.end(xml);')
+if any(NEW20 in l for l in L): print("patch 20: present")
+else:
+    i = one(lambda l: OLD20 in l, "patch 20"); L[i] = L[i].replace(OLD20, NEW20, 1)
+    changed.append(20); print("patch 20: applied (line %d)" % (i+1))
 
 # 18: put the cast remote in the interface itself.
 # The shell does not load web.stremio.com directly, it loads it through this

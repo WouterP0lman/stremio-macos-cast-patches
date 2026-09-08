@@ -220,8 +220,14 @@ puts a remote on screen:
 - a subtitle picker: subtitles that came with the download first, because those belong to
   this exact release and need no shifting, then what OpenSubtitles has, with an exact
   match marked
-- subtitle timing, half a second at a time, in both directions
+- subtitle timing, half a second at a time, in both directions, and back in step in one click
 - stop casting
+
+Presses are gathered up rather than sent one by one. Three quick jumps become one command
+of ninety seconds instead of three transcode restarts, and the panel shows where you are
+heading while you press. Devices that stop answering are left alone for a while, because
+Stremio keeps renderers in its list long after they are gone and asking those costs a
+failed request every round.
 
 Every change restarts the transcode on the server, so it takes a few seconds to land. The
 remote shows what you asked for during that window instead of letting the display jump
@@ -232,7 +238,7 @@ It does not trust what the renderer says about itself. An LG 42LM760S answers
 whole film. The remote goes by whether the server is holding a source for that device,
 which is set when a cast starts and cleared when it ends.
 
-Two things had to be fixed before it worked in the app rather than in a browser.
+Several things had to be fixed before it worked in the app rather than in a browser.
 
 The page the shell loads carries a `last-modified` from months ago and no
 `cache-control`, so WebKit keeps it for days on heuristic freshness alone and never asks
@@ -240,11 +246,30 @@ again. The app was therefore still rendering the version from before the patch, 
 script in it. The injected response now says `no-store` and drops the validators, and the
 patch script clears that one cache once so the change is picked up.
 
-The position also sat still. The server learns where a TV is only from UPnP events, and
-most renderers send those on state changes rather than while playing, so the bar would
-have been frozen for the whole film. Patch 19 refreshes it from the renderer while
-something is playing, at most every two seconds, without making the status request wait
-for a TV that answers slowly. Measured after: 16:05, 16:12, 16:19.
+The buttons did nothing. `callAction` opens an http request with no timeout at all, so a
+renderer that goes quiet leaves the call hanging for good. When the hanging call is the
+`stopAsync` inside `playFromStatus`, the load that should follow it never runs and a seek
+silently vanishes; press enough buttons and the pending sockets pile up until the server
+stops answering anything. Patch 20 gives every UPnP call six seconds. Eight commands fired
+at once now all return in milliseconds and the server stays responsive.
+
+Jumps also counted from the wrong place. `init` asks the renderer where it is, and a
+renderer that is idle answers zero. That zero landed in `mediaStatus` before the cast that
+had just been requested was set up, so the film started at the beginning and every later
+jump counted from there: a thirty second jump moved from 0:00 to 0:30 while the film was
+at 27:27, which looks exactly like a button that does nothing. Patch 22 answers the first
+status immediately and asks only for the volume. Measured after: the restarts land on
+1647, 1677 and 1707 seconds, as asked.
+
+An earlier attempt refreshed the position from the renderer every two seconds. That
+saturated the LG completely: it handles one request at a time, and once overlapped it
+answered none of them. It is gone. The panel keeps its own clock between the answers the
+server already has, which moves the bar smoothly without a single extra request reaching
+the TV.
+
+The panel also has to read what comes back as what it means. A position that was just
+seeked to arrives as the string it was written as in the query, not as a number, which
+left the time reading `--:--` and stopped the bar from moving.
 
 Verified against the LG: pressing a jump in the panel moved the film from 26:02 to 31:01
 on the TV, and the stream restarted at exactly the requested second.
@@ -415,7 +440,8 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 13 | dispatch line 42227 plus both `play()` methods | the requested start position survives the ffmpeg probe that runs before the device loads |
 | 14 | `castingUtils` line 22632, both `play()` methods | pick a subtitle automatically: the torrent's own .srt first, OpenSubtitles as fallback |
 | 18 | the UI proxy route, line 46856 | hand the interface a cast remote, and serve it from next to `server.js` |
-| 19 | `DLNAClient.status`, line 89028 | refresh the renderer's position while something plays, instead of waiting for events that never come |
+| 20 | `DeviceClient.callAction`, line 89394 | give every UPnP call a six second deadline, so a quiet renderer cannot hang it for good |
+| 22 | `DLNAClient.init`, line 89018 | answer the first status straight away, and never write the renderer's idle position over the position that was just asked for |
 
 Editing a file inside the bundle breaks the code signature seal. The script re-signs the app ad hoc with `--preserve-metadata=entitlements,flags,identifier`, so the hardened runtime flag and entitlements stay. The Developer ID signature and notarization ticket no longer apply to the modified bundle. The app launches normally on macOS 26.5.1 after this. Backups of the original `server.js` and `_CodeSignature` are written to `backups/<timestamp>/` before every change.
 

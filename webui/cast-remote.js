@@ -47,6 +47,7 @@
 
     function hold(patch) {
         held = Object.assign({}, held || {}, patch, { until: Date.now() + SETTLE });
+        if ('time' in patch) { anchorTime = null; anchorAt = Date.now(); }
         Object.assign(state, patch);
         render();
     }
@@ -61,12 +62,30 @@
 
     /* ---------- watching ---------- */
 
+    /* Stremio never drops a device that has gone away, so a list can hold renderers
+     * that stopped existing. Asking those costs a failed request every round, which
+     * is why a device that does not answer is left alone for a while. */
+    var quiet = {};
+
     function findDevice() {
         return get('/casting').then(function (list) {
             if (!Array.isArray(list)) return null;
-            var candidates = list.filter(function (d) { return d.type === 'tv' || d.type === 'chromecast'; });
+            var now = Date.now();
+            var candidates = list.filter(function (d) {
+                if (d.type !== 'tv' && d.type !== 'chromecast') return false;
+                var q = quiet[d.id];
+                return !q || now >= q.until;
+            });
             var checks = candidates.map(function (d) {
                 return get('/casting/' + d.id + '/player').then(function (s) {
+                    if (s === null) {
+                        var q = quiet[d.id] || { misses: 0 };
+                        q.misses += 1;
+                        q.until = Date.now() + Math.min(60000, 5000 * q.misses);
+                        quiet[d.id] = q;
+                        return null;
+                    }
+                    delete quiet[d.id];
                     return isCasting(s) ? { device: d, state: s } : null;
                 });
             });
@@ -102,12 +121,47 @@
         }).then(function () { setTimeout(pollState, STATE_POLL); });
     }
 
+    /* The server asks the renderer where it is only now and then, because a TV that
+     * is asked constantly stops answering anything at all. Between those answers the
+     * bar runs on its own clock, so it moves smoothly without a single extra request
+     * reaching the TV. */
+    var anchorTime = null;
+    var anchorAt = 0;
+
+    function extrapolated(serverTime, paused) {
+        if (typeof serverTime !== 'number') return serverTime;
+        if (serverTime !== anchorTime) {
+            anchorTime = serverTime;
+            anchorAt = Date.now();
+            return serverTime;
+        }
+        if (paused) { anchorAt = Date.now(); return serverTime; }
+        return serverTime + (Date.now() - anchorAt);
+    }
+
+    /* Anything sent as a query parameter comes back as the string it was written as,
+     * so a position that was just seeked to arrives as "1735000" rather than a
+     * number. Read every field back as what it is meant to be. */
+    function num(v) {
+        var n = typeof v === 'number' ? v : parseFloat(v);
+        return isFinite(n) ? n : null;
+    }
+
+    function bool(v) {
+        if (typeof v === 'boolean') return v;
+        if (v === 'true' || v === '1' || v === 1) return true;
+        if (v === 'false' || v === '0' || v === 0) return false;
+        return null;
+    }
+
     function apply(s) {
         var holding = held && Date.now() < held.until;
         if (held && !holding) held = null;
+        var paused = bool(s.paused);
         var next = {
-            time: s.time, length: s.length, paused: s.paused, volume: s.volume,
-            source: s.source, subtitlesSrc: s.subtitlesSrc, subtitlesDelay: s.subtitlesDelay || 0
+            time: extrapolated(num(s.time), paused), length: num(s.length), paused: paused,
+            volume: num(s.volume),
+            source: s.source, subtitlesSrc: s.subtitlesSrc, subtitlesDelay: num(s.subtitlesDelay) || 0
         };
         if (holding) {
             if ('time' in held) next.time = held.time;
@@ -237,15 +291,28 @@
         command({ paused: next ? 1 : 0 });
     }
 
+    /* Every change restarts the transcode, so five quick presses must become one
+     * jump rather than five casts. The panel shows where you are heading straight
+     * away and sends the total once the pressing stops. */
+    var seekTimer = null;
+    var seekTarget = null;
+
     function seekTo(ms) {
         var t = Math.max(0, Math.round(ms));
-        if (state.length) t = Math.min(t, state.length - 5000);
+        if (state.length) t = Math.min(t, Math.max(0, state.length - 5000));
+        seekTarget = t;
         hold({ time: t, paused: false });
-        command({ time: t });
+        clearTimeout(seekTimer);
+        seekTimer = setTimeout(function () {
+            var target = seekTarget;
+            seekTarget = null;
+            if (target !== null) command({ time: target });
+        }, 600);
     }
 
     function skip(seconds) {
-        seekTo((state.time || 0) + seconds * 1000);
+        var from = seekTarget !== null ? seekTarget : (state.time || 0);
+        seekTo(from + seconds * 1000);
     }
 
     function setVolume(v) {
@@ -258,10 +325,27 @@
         command({ subtitlesSrc: url || '' });
     }
 
+    var delayTimer = null;
+    var delayTarget = null;
+
     function nudgeSubtitles(ms) {
-        var next = (state.subtitlesDelay || 0) + ms;
+        var base = delayTarget !== null ? delayTarget : (state.subtitlesDelay || 0);
+        var next = base + ms;
+        delayTarget = next;
         hold({ subtitlesDelay: next });
-        command({ subtitlesDelay: next });
+        clearTimeout(delayTimer);
+        delayTimer = setTimeout(function () {
+            var target = delayTarget;
+            delayTarget = null;
+            if (target !== null) command({ subtitlesDelay: target });
+        }, 700);
+    }
+
+    function resetSubtitleDelay() {
+        delayTarget = 0;
+        hold({ subtitlesDelay: 0 });
+        clearTimeout(delayTimer);
+        delayTimer = setTimeout(function () { delayTarget = null; command({ subtitlesDelay: 0 }); }, 300);
     }
 
     function stopCasting() {
@@ -314,7 +398,9 @@
         'border-radius:2px;background:rgba(255,255,255,.2);outline:none;cursor:pointer}',
         'input[type=range].vol::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;',
         'border-radius:50%;background:#fff}',
-        '.delay{font-variant-numeric:tabular-nums;font-size:12px;min-width:46px;text-align:center}'
+        '.delay{font-variant-numeric:tabular-nums;font-size:12px;flex:1;text-align:center;color:rgba(255,255,255,.75)}',
+        '.delay.reset{cursor:pointer;text-decoration:underline}',
+        '.delay.reset:hover{color:#fff}'
     ].join('');
 
     var style = document.createElement('style');
@@ -446,15 +532,22 @@
         subRow.appendChild(sel);
         panel.appendChild(subRow);
 
-        var delayRow = el('div', 'row');
-        var dl = el('span', 'label'); dl.textContent = 'Time';
-        delayRow.appendChild(dl);
-        delayRow.appendChild(btn('-0.5s', 'Subtitles earlier', function () { nudgeSubtitles(-500); }));
-        var dv = el('span', 'delay');
         var d = (state.subtitlesDelay || 0) / 1000;
-        dv.textContent = (d > 0 ? '+' : '') + d.toFixed(1) + 's';
+        var delayRow = el('div', 'row');
+        var dl = el('span', 'label'); dl.textContent = 'Sync';
+        delayRow.appendChild(dl);
+        delayRow.appendChild(btn('Earlier', 'Show the subtitles half a second sooner',
+            function () { nudgeSubtitles(-500); }));
+        var dv = el('span', 'delay');
+        dv.textContent = d === 0 ? 'in sync' : (d > 0 ? 'late ' : 'early ') + Math.abs(d).toFixed(1) + 's';
+        dv.title = 'Click to put the subtitles back in step with the film';
+        if (d !== 0) {
+            dv.className = 'delay reset';
+            dv.addEventListener('click', resetSubtitleDelay);
+        }
         delayRow.appendChild(dv);
-        delayRow.appendChild(btn('+0.5s', 'Subtitles later', function () { nudgeSubtitles(500); }));
+        delayRow.appendChild(btn('Later', 'Show the subtitles half a second later',
+            function () { nudgeSubtitles(500); }));
         panel.appendChild(delayRow);
     }
 
