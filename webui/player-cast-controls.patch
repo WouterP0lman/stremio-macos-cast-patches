@@ -1,0 +1,119 @@
+diff --git a/src/routes/Player/Player.js b/src/routes/Player/Player.js
+index 0418490..f065d27 100644
+--- a/src/routes/Player/Player.js
++++ b/src/routes/Player/Player.js
+@@ -18,6 +18,7 @@ const { default: Buffering } = require('./Buffering');
+ const VolumeChangeIndicator = require('./VolumeChangeIndicator');
+ const Error = require('./Error');
+ const ControlBar = require('./ControlBar');
++const useCastDevice = require('./useCastDevice').default;
+ const NextVideoPopup = require('./NextVideoPopup');
+ const StatisticsMenu = require('./StatisticsMenu');
+ const OptionsMenu = require('./OptionsMenu');
+@@ -128,6 +129,11 @@ const Player = () => {
+     const [castDevicesSearching, setCastDevicesSearching] = React.useState(false);
+     const castDevicesLoading = platform.shell.active && (castDevicesSearching || (streamingServer.playbackDevices !== null && streamingServer.playbackDevices.type === 'Loading'));
+     const { streamingUrl: castStreamingUrl, playOnDevice } = usePlayOnDevice(player.selected?.stream ?? null);
++    // A TV gets no transport from the player, so keep one here: which device we
++    // handed playback to, and a line to it for the controls below.
++    const [castDeviceId, setCastDeviceId] = React.useState(null);
++    const castDevice = useCastDevice(streamingServer.baseUrl ?? null, castDeviceId);
++    const castActive = castDevice.active;
+     const shellCastSupported = platform.shell.active && castStreamingUrl !== null;
+     const refreshCastDevices = React.useCallback(() => {
+         if (platform.shell.active) {
+@@ -141,8 +147,10 @@ const Player = () => {
+     }, [platform.shell.active]);
+     const onCastDeviceSelected = React.useCallback((deviceId) => {
+         playOnDevice(deviceId, video.state.time);
++        const device = castDevices.find(({ id }) => id === deviceId);
++        setCastDeviceId(device && device.type === 'tv' ? deviceId : null);
+         closeCastDevicesMenu();
+-    }, [playOnDevice, video.state.time]);
++    }, [playOnDevice, video.state.time, castDevices]);
+     React.useEffect(() => {
+         if (castDevicesMenuOpen && platform.shell.active) {
+             setCastDevicesSearching(true);
+@@ -241,16 +249,18 @@ const Player = () => {
+     }, []);
+ 
+     const onPlayRequested = React.useCallback(() => {
++        if (castActive) return castDevice.play();
+         playingOnExternalDevice.current = false;
+         video.setPaused(false);
+         setSeeking(false);
+-    }, []);
++    }, [castActive, castDevice.play]);
+ 
+     const onPlayRequestedDebounced = React.useCallback(debounce(onPlayRequested, 200), []);
+ 
+     const onPauseRequested = React.useCallback(() => {
++        if (castActive) return castDevice.pause();
+         video.setPaused(true);
+-    }, []);
++    }, [castActive, castDevice.pause]);
+ 
+     const onPauseRequestedDebounced = React.useCallback(debounce(onPauseRequested, 200), []);
+     const onMuteRequested = React.useCallback(() => {
+@@ -262,13 +272,20 @@ const Player = () => {
+     }, []);
+ 
+     const onVolumeChangeRequested = React.useCallback((volume) => {
++        if (castActive) return castDevice.setVolume(volume);
+         video.setVolume(volume);
+-    }, []);
++    }, [castActive, castDevice.setVolume]);
+ 
+     const commitSeek = React.useCallback((time) => {
++        if (castActive) return castDevice.seek(time);
+         video.setTime(time);
+         seek(time, video.state.duration, video.state.manifest?.name);
+-    }, [video.state.duration, video.state.manifest]);
++    }, [video.state.duration, video.state.manifest, castActive, castDevice.seek]);
++    const shownPaused = castActive ? castDevice.state.paused : video.state.paused;
++    const shownTime = castActive ? castDevice.state.time : video.state.time;
++    const shownDuration = castActive ? (castDevice.state.duration ?? video.state.duration) : video.state.duration;
++    const shownVolume = castActive ? castDevice.state.volume : video.state.volume;
++
+     const {
+         time: keyboardSeekTime,
+         seekBy: seekByKeyboard,
+@@ -277,8 +294,8 @@ const Player = () => {
+         flush: flushKeyboardSeek,
+         release: releaseKeyboardSeek,
+     } = useKeyboardSeek({
+-        time: video.state.time,
+-        duration: video.state.duration,
++        time: shownTime,
++        duration: shownDuration,
+         onSeek: commitSeek,
+         setSeeking,
+     });
+@@ -288,8 +305,8 @@ const Player = () => {
+         seekByKeyboard(offset);
+     }, [seekByKeyboard]);
+     const overlayHidden = React.useMemo(() => {
+-        return keyboardSeekTime === null && immersed && !casting && video.state.paused !== null && !video.state.paused && !menusOpen;
+-    }, [keyboardSeekTime, immersed, casting, video.state.paused, menusOpen]);
++        return keyboardSeekTime === null && immersed && !casting && !castActive && video.state.paused !== null && !video.state.paused && !menusOpen;
++    }, [keyboardSeekTime, immersed, casting, castActive, video.state.paused, menusOpen]);
+ 
+     React.useEffect(() => {
+         if (!video.state.manifest?.props.includes('subtitlesOffsetMinimum')) {
+@@ -1069,11 +1086,11 @@ const Player = () => {
+             <ControlBar
+                 ref={controlBarRef}
+                 className={classnames(styles['layer'], styles['control-bar-layer'])}
+-                paused={video.state.paused}
+-                time={keyboardSeekTime ?? video.state.time}
+-                duration={video.state.duration}
+-                buffered={video.state.buffered}
+-                volume={video.state.volume}
++                paused={shownPaused}
++                time={keyboardSeekTime ?? shownTime}
++                duration={shownDuration}
++                buffered={castActive ? null : video.state.buffered}
++                volume={shownVolume}
+                 muted={video.state.muted}
+                 playbackSpeed={video.state.playbackSpeed}
+                 subtitlesTracks={allSubtitleTracks}
