@@ -408,7 +408,7 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 9 | `ensureEventingServer`, lines 89491-89493 | repair the TV's malformed event XML instead of discarding it, restoring transport state updates |
 | 10 | `Casting.prototype.makeSubs`, lines 83000-83015 | shift the .srt text in JS instead of `ffmpeg -ss`, so subtitle delay (earlier/later) actually works |
 | 11 | `Player.prototype.middleware` line 42227, both `play()` methods | a cast keeps the position the request carries instead of forcing 0 |
-| 12 | `_updateStatusField`, line 89000 | do not add `seekTime` to a position the renderer already reports absolutely |
+| 12, 16 | `_updateStatusField` line 89000, `DLNAClient.play` | learn per device whether it reports absolute or relative time, instead of guessing |
 | 13 | dispatch line 42227 plus both `play()` methods | the requested start position survives the ffmpeg probe that runs before the device loads |
 | 14 | `castingUtils` line 22632, both `play()` methods | pick a subtitle automatically: the torrent's own .srt first, OpenSubtitles as fallback |
 

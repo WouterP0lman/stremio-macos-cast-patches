@@ -19,7 +19,7 @@
 #  9  repair TV event XML                : LG echoes our cast URL with unescaped '&' plus a trailing NUL byte, so every UPnP
 #                                        status event was unparseable; repair instead of discard, restoring transport state
 # 11  cast keeps your position         : play() no longer forces time=0, so a cast can start where you were
-# 12  no double-counted position       : ffmpeg uses -copyts so the renderer already reports absolute time;
+# 12  no double-counted position       : learn per device whether it reports absolute or relative time;
 #                                        adding seekTime on top made the position jump ahead after every seek
 # 13  requested position survives      : the ffmpeg probe in play() left a window where the still-playing old
 #                                        stream overwrote the position you asked for; Chromecast also needs seekTime
@@ -208,8 +208,9 @@ else:
 
 # 12: position from a DLNA renderer is not double counted after a seek
 OLD12 = 'this.mediaStatus[field] = this.seekTime + 1e3 * parseInt(value, 10);'
-NEW12 = ('this.mediaStatus[field] = (function (t, s) { return t >= s ? t : s + t; })'
-         '(1e3 * parseInt(value, 10), this.seekTime || 0);')
+NEW12 = ('var _t = 1e3 * parseInt(value, 10), _s = this.seekTime || 0; '
+         'if (_s > 3e4 && this._absTime === undefined) this._absTime = _t >= _s - 5e3; '
+         'this.mediaStatus[field] = this._absTime === false ? _s + _t : (_t >= _s ? _t : _s + _t);')
 if any(NEW12 in l for l in L): print("patch 12: present")
 else:
     i = one(lambda l: OLD12 in l, "patch 12"); L[i] = L[i].replace(OLD12, NEW12, 1)
@@ -305,6 +306,14 @@ else:
         'self._canAc3 = /ac-?3|dolby/.test(txt) || /mpeg_ts_(sd|hd)_(na|eu|ko)/.test(txt); } catch (e2) {} }); '
         '} catch (e) {} }')
     changed.append(15); print("patch 15: applied (lines %d, %d)" % (at + 1, k + 1))
+
+# 16: forget how the previous stream reported time when a new cast starts
+OLD16 = 'this.mediaStatus.source = srcURL, this.mediaStatus.time = parseInt(startAt, 10) || 0, this.mediaStatus.subtitlesSrc = null'
+NEW16 = 'this._absTime = undefined, this.mediaStatus.source = srcURL, this.mediaStatus.time = parseInt(startAt, 10) || 0, this.mediaStatus.subtitlesSrc = null'
+if any("this._absTime = undefined, this.mediaStatus.source" in l for l in L): print("patch 16: present")
+else:
+    i = one(lambda l: OLD16 in l, "patch 16"); L[i] = L[i].replace(OLD16, NEW16, 1)
+    changed.append(16); print("patch 16: applied (line %d)" % (i+1))
 
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)

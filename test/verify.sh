@@ -133,7 +133,14 @@ var out = shiftSrt(srt, -10000);
 console.log(/00:00:00,000/.test(out) ? "  ok    clamps at zero" : "  FAIL  wraps around: " + out.split("\n")[1]);
 JS
 
-echo "7. real Linux (container)"
+echo "7. position logic across renderer types"
+if "$NODE" "$DIR/test/position-logic.js" 2>&1 | grep -q PASS; then
+  ok "absolute and relative renderers both handled"
+else
+  bad "position logic regressed (run test/position-logic.js)"
+fi
+
+echo "8. real Linux (container)"
 if bash "$DIR/test/linux.sh" 2>&1 | sed 's/^/  /' | grep -q "all good on linux"; then
   ok "platform code works on real Linux"
 else
