@@ -9,9 +9,10 @@
 #   3. the patches apply cleanly to simulated Linux and Windows installs,
 #      producing byte-identical output (they are platform independent)
 #   4. storage detection and the language preference work for all three platforms
-#   5. subtitle picking finds the episode's own .srt for a loaded torrent
+#   5. the shipped subtitle picker chooses the right file, incl. language
 #   6. subtitle shifting clamps at zero instead of wrapping around
-#   7. the platform-dependent code runs on real Linux (needs Docker)
+#   7. position reporting is right on absolute and relative renderers
+#   8. the platform-dependent code runs on real Linux (needs Docker)
 set -u
 DIR=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
@@ -93,27 +94,33 @@ var homes = {};
 });
 JS
 
-echo "5. subtitle picking on a live torrent"
+echo "5. subtitle picking"
+if OUT=$("$NODE" "$DIR/test/subtitle-pick.js" 2>&1) && echo "$OUT" | grep -q PASS; then
+  ok "the shipped picker chooses the right file in every case"
+else
+  bad "subtitle picking regressed:"; echo "$OUT" | sed 's/^/      /'
+fi
 "$NODE" - <<'JS'
+// extra: say what the picker would do for the torrent that is loaded right now
 var http = require("http");
 http.get("http://127.0.0.1:11470/stats.json", function (res) {
   var b = ""; res.on("data", function (c) { b += c; });
   res.on("end", function () {
-    var stats; try { stats = JSON.parse(b); } catch (e) { console.log("  skip  server not reachable"); return; }
+    var stats; try { stats = JSON.parse(b); } catch (e) { return console.log("  note  server not reachable, live torrent not checked"); }
     var ih = Object.keys(stats)[0];
-    if (!ih) { console.log("  skip  no torrent loaded"); return; }
+    if (!ih) return console.log("  note  no torrent loaded, live torrent not checked");
     var files = (stats[ih].files || []).map(function (f) { return f.name || f.path; });
     var vid = files.findIndex(function (f) { return /\.(mp4|mkv|avi)$/i.test(f || ""); });
-    if (vid < 0) { console.log("  skip  no video in torrent"); return; }
-    var stem = String(files[vid]).replace(/^.*[\/\\]/, "").replace(/\.[^.]+$/, "").toLowerCase();
+    if (vid < 0) return console.log("  note  torrent holds no video, live torrent not checked");
+    var stem = function (n) { return String(n).replace(/^.*[\/\\]/, "").replace(/\.[^.]+$/, "").toLowerCase(); };
+    var want = stem(files[vid]);
     var sub = files.findIndex(function (f, i) {
-      return i !== vid && /\.(srt|ass|ssa|sub|vtt)$/i.test(f || "") &&
-        String(f).replace(/^.*[\/\\]/, "").replace(/\.[^.]+$/, "").toLowerCase() === stem;
+      return i !== vid && /\.(srt|ass|ssa|sub|vtt)$/i.test(f || "") && stem(f).indexOf(want) === 0;
     });
-    console.log(sub >= 0 ? "  ok    torrent ships its own subtitle (index " + sub + ")"
-                         : "  ok    no sidecar in this torrent, fallback path applies");
+    console.log(sub >= 0 ? "  note  loaded torrent ships its own subtitle (index " + sub + ")"
+                         : "  note  loaded torrent has no sidecar, the online fallback applies");
   });
-}).on("error", function () { console.log("  skip  server not reachable"); });
+}).on("error", function () { console.log("  note  server not reachable, live torrent not checked"); });
 JS
 
 echo "6. subtitle shift clamps at zero"
