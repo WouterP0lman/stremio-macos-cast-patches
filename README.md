@@ -151,11 +151,11 @@ Verified end to end against the running server:
 
 If a TV stays silent with AC3, it has no Dolby Digital decoder for this container; revert patch 6 by restoring `server.js` from `backups/` and re-running the script without it.
 
-## Subtitles when casting to a DLNA TV (patches 8 and 9, plus cast-subs.py)
+## Subtitles when casting to a DLNA TV (patches 8 and 9)
 
 Three separate problems stack up here.
 
-**The UI never passes the subtitle along.** `Player.prototype.middleware` (line 42214) only dispatches `subtitles` when a request carries `subtitlesSrc`, `subtitlesDelay` or `subtitlesSize`, and `DLNAClient.play` (line 89073) explicitly nulls `subtitlesSrc` when a cast starts. Reading the live cast URI off the TV with a read-only `GetMediaInfo` shows `...&audioTrack=0%3A1&time=0&subtitles=&subtitlesDelay=0`: the parameter is empty, and the running ffmpeg used `-c copy`, which per line 83053 (`copyVideo = !subtitles`) proves the server was never asked for subtitles. Picking a subtitle in the player before casting does not survive; picking one during the cast restarted the stream but still sent an empty value. `cast-subs.py` in this repo sends the request the UI should have sent.
+**The UI never passes the subtitle along.** `Player.prototype.middleware` (line 42214) only dispatches `subtitles` when a request carries `subtitlesSrc`, `subtitlesDelay` or `subtitlesSize`, and `DLNAClient.play` (line 89073) explicitly nulls `subtitlesSrc` when a cast starts. Reading the live cast URI off the TV with a read-only `GetMediaInfo` shows `...&audioTrack=0%3A1&time=0&subtitles=&subtitlesDelay=0`: the parameter is empty, and the running ffmpeg used `-c copy`, which per line 83053 (`copyVideo = !subtitles`) proves the server was never asked for subtitles. Picking a subtitle in the player before casting does not survive; picking one during the cast restarted the stream but still sent an empty value. Patch 14 makes the server choose one itself, and patch 18 puts the choice in the interface.
 
 **The timing was wrong even when it did work.** `makeSubs` was called with `Math.max(0, offset - subtitlesDelay)` and shifts the .srt with `ffmpeg -ss`, while line 83070 passes `-copyts` so the decoded frames keep their original PTS. The subtitles therefore ran ahead by roughly the seek offset, then ran out. Worse, ffmpeg cannot seek inside a subtitle stream and rebases on the previous cue, so the actual shift is quantised (measured: 18 s for a requested 20 s). Patch 8 passes offset 0, which makes the original timings line up exactly and removes an ffmpeg spawn per cast. Demonstrated: shifting produced `00:00:00,000 --> CUE AT 20 SEC` for a cue that belongs at 20 s.
 
@@ -172,86 +172,75 @@ Capturing a real NOTIFY by subscribing to the TV's AVTransport service showed wh
 
 That is the exact payload behind the crash in patch 1, and it explains the follow-on symptom: after patch 1 stopped the crash the events were merely discarded, so Stremio never learned the playback position and restarted every stream at 0. Patch 9 repairs the document (`&` that starts no valid entity becomes `&amp;`, XML-illegal control characters are dropped) before both parses, and keeps patch 1's try/catch as a backstop. Verified against the captured event: 22 fields recovered, including `TransportState`, `TransportStatus` and `CurrentTrackDuration`.
 
-### cast-subs.py
+### What replaced the helper script
 
-```bash
-python3 cast-subs.py tt14186672:1:3        # subtitles for a series episode
-python3 cast-subs.py tt1234567 dut         # a movie, Dutch
-python3 cast-subs.py --list tt14186672:1:3 # what is available
-python3 cast-subs.py off                   # back to the lossless copy
-```
-
-It finds the active cast, reads the current position, fetches a track from the OpenSubtitles v3 addon, checks that Stremio's own `/subtitles.srt` endpoint can parse it, and sends `subtitlesSrc` plus the position so playback resumes where it was. Only addon subtitles work: a track embedded in the file has no URL for `/subtitles.srt?from=` to fetch.
+An earlier version of this repo shipped `cast-subs.py`, which sent the subtitle request
+the interface never sent. Patch 14 moved that into the server, which now picks a subtitle
+itself when a cast starts, and patch 18 puts the choice back in the interface where it
+belongs. The script is gone; nothing outside the app is needed any more.
 
 Known limits: seeking from the TV remote is impossible (the server advertises `DLNA.ORG_OP=01` but has no `TimeSeekRange` handler, and the piped Matroska has no length or cues), and turning subtitles on replaces the lossless video copy with a libx264 ultrafast re-encode for as long as they are on.
 
-## Tools: remote, sync and subtitles
+## Patch 18: a remote in the app, once you cast
 
-Three scripts sit on top of the patches. They talk to the streaming server's own
-casting API (`/casting`, `/casting/<device>/player`), so they work for DLNA TVs
-and Chromecasts alike.
+Casting to a TV from the desktop works once and then stops. The interface dispatches
+`PlayOnDevice`, pauses the local video, and never speaks to the device again:
 
-### `remote/cast-remote.py` - a remote control in your browser
-
-```bash
-python3 remote/cast-remote.py     # then open http://localhost:11471
+```js
+if (name === 'PlayingOnDevice') {
+    playingOnExternalDevice.current = true;
+    onPauseRequested();
+}
 ```
 
-Seek by 10s/30s/1m/5m or scrub to any point, pause, volume, stop. Subtitles with
-a language picker (it identifies what is playing through Cinemeta and lists what
-OpenSubtitles has) and earlier/later timing in half-second steps. It polls the
-device every two seconds and pauses polling right after a command, because every
-change restarts the stream.
+Everything after that keeps driving the local player. Pause, seek, subtitles and volume
+all go to a video nobody is watching, which is why the desktop and the TV end up in
+different places and nothing you press reaches the room you are in. Casting state in
+`stremio-web` is derived purely from the Google Cast SDK, so a device of type `tv` never
+enters it. Chromecast has a whole transport for this. A TV has none.
 
-### `remote/cast-sync.py` - fallback, no longer the recommended route
+The fix has to live in the interface, and the interface turns out to be reachable. The
+shell does not load `web.stremio.com` directly. It loads it **through this server**:
 
-Patch 13 makes a cast start where you left off and patch 14 gives it subtitles, both inside
-the server, so this is only needed if you would rather not patch. It still works.
-
-Casting always begins at 0 with no subtitles. `DLNAClient.play` reset `time` to
-zero unconditionally; patch 11 changes that, so a request carrying `time`
-alongside `source` now starts there (the dispatch at line 42227 passes it
-through, and both the DLNA and Chromecast `play()` take a second argument).
-Whether that alone is enough depends on the Stremio UI sending its position at
-all, which it does not appear to do. This script covers it either way, because
-Stremio does store your position, in the web UI's localStorage under
-`library_recent`:
-
-```json
-{"video_id": "tt14186672:1:3", "timeOffset": 1554247, "duration": 3268932}
+```
+ENDPOINT http://localhost:11470/proxy/d=https%3A%2F%2Fweb.stremio.com/#/?streamingServerUrl=...
 ```
 
-This reads that file, matches the streaming file name to the library entry
-(title plus SxxExx), and applies the position and a subtitle track to the cast.
-When the episode has no stored position yet it still derives the video id from
-the show's IMDb id and the file name, so subtitles work on a fresh episode.
+So the page can be handed one extra script on the way past. Same origin, same session,
+no second process, nothing to install and nothing to log in to again. Remove the patches
+and it is gone.
 
-```bash
-python3 remote/cast-sync.py            # watch, fix every new cast automatically
-python3 remote/cast-sync.py --once     # fix the cast running now
-python3 remote/cast-sync.py --dry      # show what it would do
-python3 remote/cast-sync.py --lang dut # another language
-python3 remote/cast-sync.py --no-subs  # position only
-```
+`webui/cast-remote.js` is that script. It watches for a cast, and while one is running it
+puts a remote on screen:
 
-Stremio writes that position every few minutes rather than continuously, so it
-can lag a couple of minutes behind what is on screen.
+- what is playing and on which device, by name, read from the torrent's own file list
+- a position bar you can scrub, with the real position of the film
+- play and pause, and jumps of thirty seconds and five minutes
+- volume
+- a subtitle picker: subtitles that came with the download first, because those belong to
+  this exact release and need no shifting, then what OpenSubtitles has, with an exact
+  match marked
+- subtitle timing, half a second at a time, in both directions
+- stop casting
 
-### `cast-subs.py` - subtitles and position by hand
+Every change restarts the transcode on the server, so it takes a few seconds to land. The
+remote shows what you asked for during that window instead of letting the display jump
+back to the old stream.
 
-```bash
-python3 cast-subs.py tt14186672:1:3        # subtitles for an episode
-python3 cast-subs.py --at 24:01            # jump to a position
-python3 cast-subs.py off                   # subtitles off
-```
+It does not trust what the renderer says about itself. An LG 42LM760S answers
+`GetTransportInfo` with nothing at all, so its reported state sits at `STOPPED` for the
+whole film. The remote goes by whether the server is holding a source for that device,
+which is set when a cast starts and cleared when it ends.
 
-### One thing to know about combining commands
+Verified against the LG: pressing a jump in the panel moved the film from 26:02 to 31:01
+on the TV, and the stream restarted at exactly the requested second.
 
-Setting subtitles and a position in a single request does not stick. The
-subtitle change restarts the stream, and during that restart Stremio accepts the
-device's own position again (which patch 9 made possible), overwriting the
-requested one. Send them as two commands a few seconds apart; `cast-sync.py`
-already does that.
+### Upstreaming this
+
+The proxy is a delivery route, not the right home. `webui/useCastDevice.ts` and
+`webui/player-cast-controls.patch` are the same thing built into `stremio-web` itself,
+where the existing control bar drives the device instead of a separate panel. That is
+what belongs upstream; the injected script is what works today without waiting for it.
 
 ## Patch 14: subtitles without a helper, without the internet
 
@@ -411,6 +400,7 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 12, 16 | `_updateStatusField` line 89000, `DLNAClient.play` | learn per device whether it reports absolute or relative time, ignoring the first answers while it is still buffering |
 | 13 | dispatch line 42227 plus both `play()` methods | the requested start position survives the ffmpeg probe that runs before the device loads |
 | 14 | `castingUtils` line 22632, both `play()` methods | pick a subtitle automatically: the torrent's own .srt first, OpenSubtitles as fallback |
+| 18 | the UI proxy route, line 46856 | hand the interface a cast remote, and serve it from next to `server.js` |
 
 Editing a file inside the bundle breaks the code signature seal. The script re-signs the app ad hoc with `--preserve-metadata=entitlements,flags,identifier`, so the hardened runtime flag and entitlements stay. The Developer ID signature and notarization ticket no longer apply to the modified bundle. The app launches normally on macOS 26.5.1 after this. Backups of the original `server.js` and `_CodeSignature` are written to `backups/<timestamp>/` before every change.
 
@@ -516,9 +506,8 @@ The server is not open source. Three bugs are filed at `Stremio/stremio-bugs`: [
 
 - `stremio-upnp-patch.sh`: the patch script (apply, `DRY=1`, or `STREMIO_SERVER_JS=<copy>` to test on a copy)
 - `launchd/`: optional re-patch watcher for after auto-updates
-- `cast-subs.py`: turn subtitles on for a running cast
-- `remote/cast-remote.py`: browser remote control (seek, subtitles, timing)
-- `remote/cast-sync.py`: resume where you left off, with subtitles (fallback for unpatched servers)
+- `webui/cast-remote.js`: the remote the interface gets, installed next to `server.js`
+- `webui/useCastDevice.ts` and `webui/player-cast-controls.patch`: the same thing for upstream
 - `test/fake-dlna-tv.py`: a fake TV, to verify casting without hardware
 - `test/cast-e2e.py`: casts a real film to that fake TV and checks what arrives
 - `test/subtitle-pick.js`: the shipped subtitle picker against nine torrents

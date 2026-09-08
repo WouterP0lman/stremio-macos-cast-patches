@@ -336,6 +336,50 @@ else:
         '} catch (e) {} }')
     changed.append(15); print("patch 15: applied (lines %d, %d)" % (at + 1, k + 1))
 
+# 18: put the cast remote in the interface itself.
+# The shell does not load web.stremio.com directly, it loads it through this
+# server's own proxy, so the page can be handed one extra script on the way past.
+# Same origin, same session, no second process, and it disappears again the moment
+# the patches are removed.
+OLD18 = 'enginefs.router.use("/proxy", proxy.getRouter());'
+NEW18 = ('enginefs.router.get("/cast-remote.js", function (req, res) { '
+         'try { var f18 = __webpack_require__(1), p18 = __webpack_require__(5); '
+         'var here = [process.execPath, process.argv[1] || ""].map(function (x) { return p18.dirname(x); }); '
+         'var file = null; for (var i18 = 0; i18 < here.length; i18++) { '
+         'var c18 = p18.join(here[i18], "cast-remote.js"); if (f18.existsSync(c18)) { file = c18; break; } } '
+         'if (!file) throw new Error("cast-remote.js not installed"); '
+         'var body = f18.readFileSync(file); '
+         'res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8", '
+         '"Content-Length": body.length, "Cache-Control": "no-store" }); res.end(body); } '
+         'catch (e) { res.writeHead(404, { "Content-Type": "text/plain" }); res.end("no cast remote"); } }), '
+         'enginefs.router.use("/proxy", function (req, res, next) { '
+         'var wantsPage = /text\\/html/i.test(String(req.headers.accept || "")); '
+         'if (!wantsPage) return next(); '
+         'delete req.headers["accept-encoding"]; '
+         'var chunks = [], isHtml = false, w = res.write, e = res.end, wh = res.writeHead; '
+         'res.writeHead = function (code, a, b) { '
+         'var hs = (a && typeof a === "object") ? a : (b && typeof b === "object" ? b : null); '
+         'var ct = res.getHeader("content-type") || (hs && (hs["content-type"] || hs["Content-Type"])) || ""; '
+         'isHtml = /text\\/html/i.test(String(ct)); '
+         'if (isHtml) { try { res.removeHeader("content-length"); } catch (x) {} '
+         'if (hs) { delete hs["content-length"]; delete hs["Content-Length"]; } } '
+         'return wh.apply(res, arguments); }; '
+         'res.write = function (c, enc, cb) { if (!isHtml) return w.apply(res, arguments); '
+         'if (c) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c, typeof enc === "string" ? enc : "utf8")); '
+         'if (typeof enc === "function") enc(); else if (typeof cb === "function") cb(); return true; }; '
+         'res.end = function (c, enc, cb) { if (!isHtml) return e.apply(res, arguments); '
+         'if (c && typeof c !== "function") chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c, typeof enc === "string" ? enc : "utf8")); '
+         'var html = Buffer.concat(chunks).toString("utf8"); '
+         'if (html.indexOf("</body>") >= 0 && html.indexOf("cast-remote.js") < 0) '
+         'html = html.replace("</body>", "<script src=\\"/cast-remote.js\\"></script></body>"); '
+         'res.write = w; res.end = e; return e.call(res, html, "utf8"); }; '
+         'next(); }), '
+         'enginefs.router.use("/proxy", proxy.getRouter());')
+if any("cast-remote.js" in l for l in L): print("patch 18: present")
+else:
+    i = one(lambda l: OLD18 in l, "patch 18"); L[i] = L[i].replace(OLD18, NEW18, 1)
+    changed.append(18); print("patch 18: applied (line %d)" % (i+1))
+
 # 16: forget how the previous stream reported time when a new cast starts
 OLD16 = 'this.mediaStatus.source = srcURL, this.mediaStatus.time = parseInt(startAt, 10) || 0, this.mediaStatus.subtitlesSrc = null'
 NEW16 = 'this._absTime = undefined, this.mediaStatus.source = srcURL, this.mediaStatus.time = parseInt(startAt, 10) || 0, this.mediaStatus.subtitlesSrc = null'
@@ -435,6 +479,11 @@ mkdir -p "$BK"; cp -p "$S" "$BK/server.js.orig"
 [ -n "$APP" ] && [ -d "$APP/Contents/_CodeSignature" ] && cp -Rp "$APP/Contents/_CodeSignature" "$BK/"
 run_patch "$S" "" | grep -v "^patch" || true
 check_syntax && echo "syntax OK"
+# the remote lives next to server.js so the server can hand it to the interface
+if [ -f "$DIR/webui/cast-remote.js" ]; then
+  cp "$DIR/webui/cast-remote.js" "$(dirname "$S")/cast-remote.js"
+  echo "cast remote installed next to server.js"
+fi
 if [ -n "$APP" ] && command -v codesign >/dev/null; then
   # editing a file inside the bundle breaks the code signature seal, so re-sign
   # ad hoc; entitlements and the hardened-runtime flag are preserved
