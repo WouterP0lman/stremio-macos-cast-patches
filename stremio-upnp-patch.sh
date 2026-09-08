@@ -101,7 +101,14 @@ else:
 # 3: SOAP response try/catch (+ null-safe errorDescription)
 OLD3 = 'var doc = et.parse(buf.toString());'
 NEW3 = 'var doc; try { doc = et.parse(buf.toString()); } catch (e) { e.code = "EUPNP", console.error("[patch] malformed SOAP response XML:", e && e.message); return callback(e); }'
-if any('try { doc = et.parse(buf.toString()); } catch (e) { e.code = "EUPNP"' in l for l in L): print("patch 3: present")
+# Patch 17a herschrijft deze regel later tot et.parse(fixXmlSoap(...)), dus de
+# aanwezigheidstoets kijkt naar wat beide vormen delen: de catch met EUPNP op de
+# regel waar de SOAP-response wordt geparsed. Keek hij alleen naar de kale vorm,
+# dan zag patch 3 zichzelf na 17a niet meer terug, probeerde hij opnieuw, vond
+# hij zijn anker niet en brak het hele script af. Dan wordt er niets gepatcht,
+# ook de vijftien andere niet.
+if any('catch (e) { e.code = "EUPNP"' in l and "et.parse(" in l and "buf.toString()" in l for l in L):
+    print("patch 3: present")
 else:
     i = one(lambda l: l.strip() == OLD3, "patch 3")
     assert "200 !== res.statusCode" in L[i+1], L[i+1]
@@ -134,10 +141,19 @@ else:
     i = one(lambda l: OLD6 in l or PREV6 in l, "patch 6"); L[i] = L[i].replace(PREV6 if PREV6 in L[i] else OLD6, NEW6, 1)
     changed.append(6); print("patch 6: applied (line %d)" % (i+1))
 
-# 7: AAC fallback via AudioToolbox at 192 kbit/s
+# 7: AAC fallback via AudioToolbox at 192 kbit/s.
+# The encoder name has to come from ffmpegPath, the local the surrounding
+# Promise.all already resolved. "this" is undefined inside that callback, so
+# reaching for this.executables there throws and every cast that re-encodes
+# audio dies after 54 bytes.
 OLD7 = '"-c:a", "aac", "-ac", "2")'
-NEW7 = '"-c:a", castingUtils.aacEncoder(this.executables.ffmpeg), "-b:a", "192k", "-ac", "2")'
+NEW7 = '"-c:a", castingUtils.aacEncoder(ffmpegPath), "-b:a", "192k", "-ac", "2")'
+BAD7 = 'castingUtils.aacEncoder(this.executables.ffmpeg)'
 if any(NEW7 in l for l in L): print("patch 7: present")
+elif any(BAD7 in l for l in L):
+    i = one(lambda l: BAD7 in l, "patch 7 repair")
+    L[i] = L[i].replace(BAD7, 'castingUtils.aacEncoder(ffmpegPath)', 1)
+    changed.append(7); print("patch 7: repaired an earlier broken version (line %d)" % (i+1))
 else:
     i = one(lambda l: OLD7 in l and "copyAudio ?" in l, "patch 7"); L[i] = L[i].replace(OLD7, NEW7, 1)
     changed.append(7); print("patch 7: applied (line %d)" % (i+1))
@@ -206,12 +222,25 @@ else:
         L[k] = L[k].replace(TIME0, TIMEN, 1)
     changed.append(11); print("patch 11: applied (line %d plus both play methods)" % (i+1))
 
-# 12: position from a DLNA renderer is not double counted after a seek
+# 12: position from a DLNA renderer is not double counted after a seek.
+# Renderers disagree about what they report: some answer with the point in the
+# film, others with how long they have been playing. Decide once per cast, and
+# never on a report below 5 seconds, because a renderer that has been told to
+# play but has not started yet answers 0 whichever kind it is. Learning "not
+# started" as "counts from zero" is what put an LG 20 minutes ahead of itself.
 OLD12 = 'this.mediaStatus[field] = this.seekTime + 1e3 * parseInt(value, 10);'
 NEW12 = ('var _t = 1e3 * parseInt(value, 10), _s = this.seekTime || 0; '
-         'if (_s > 3e4 && this._absTime === undefined) this._absTime = _t >= _s - 5e3; '
-         'this.mediaStatus[field] = this._absTime === false ? _s + _t : (_t >= _s ? _t : _s + _t);')
+         'if (_s > 3e4 && this._absTime === undefined && _t >= 5e3) this._absTime = _t >= _s - 5e3; '
+         'this.mediaStatus[field] = this._absTime === true ? _t : '
+         '(this._absTime === false ? _s + _t : (_t >= _s ? _t : _s + _t));')
+BAD12 = 'if (_s > 3e4 && this._absTime === undefined) this._absTime'
 if any(NEW12 in l for l in L): print("patch 12: present")
+elif any(BAD12 in l for l in L):
+    i = one(lambda l: BAD12 in l, "patch 12 repair")
+    k = L[i].index('var _t = 1e3 * parseInt(value, 10), _s = this.seekTime || 0;')
+    end = L[i].index('_s + _t);', k) + len('_s + _t);')
+    L[i] = L[i][:k] + NEW12 + L[i][end:]
+    changed.append(12); print("patch 12: repaired an earlier version (line %d)" % (i+1))
 else:
     i = one(lambda l: OLD12 in l, "patch 12"); L[i] = L[i].replace(OLD12, NEW12, 1)
     changed.append(12); print("patch 12: applied (line %d)" % (i+1))
@@ -314,6 +343,67 @@ if any("this._absTime = undefined, this.mediaStatus.source" in l for l in L): pr
 else:
     i = one(lambda l: OLD16 in l, "patch 16"); L[i] = L[i].replace(OLD16, NEW16, 1)
     changed.append(16); print("patch 16: applied (line %d)" % (i+1))
+
+# 17: repair the XML a TV sends about itself, and never let a parse error kill the process
+#
+# Patch 9 repairs the event XML, but the same LG quirk (our cast URL echoed back
+# with an unescaped '&', plus a trailing NUL) also lands in two other places:
+# the SOAP reply to Play/Stop, and the device description fetched at discovery.
+#
+# The SOAP one was caught by patch 3, so it only broke casting. The description
+# one was not caught at all: et.parse throws inside a fetch callback, nothing is
+# listening, and the process dies. That is "Stremio server stopped" a second
+# after "Discovery of new tv device - [TV]42LM760S-ZB".
+#
+# So: repair first (same regex as patch 9, from the same constant), and keep a
+# catch behind it that hands the error to the callback instead of the void.
+DESC_FIX = FIX.replace("var fixXml", "var fixXmlDesc").replace("fixXml(", "fixXmlDesc(")
+
+# a) SOAP reply: repair, not just catch. Works on both the patched and the raw line.
+if any("et.parse(fixXmlSoap(buf.toString()))" in l for l in L): print("patch 17a: present")
+else:
+    i = one(lambda l: "doc = et.parse(buf.toString());" in l and "errorDescription" not in l, "patch 17a")
+    SOAP_FIX = FIX.replace("var fixXml", "var fixXmlSoap").replace("fixXml(", "fixXmlSoap(")
+    if "try { doc = et.parse(buf.toString());" in L[i]:
+        # patch 3 is already there: put the repair in front of its parse
+        L[i] = L[i].replace("try { doc = et.parse(buf.toString());",
+                            "try { " + SOAP_FIX + "doc = et.parse(fixXmlSoap(buf.toString()));", 1)
+    else:
+        L[i] = L[i].replace("var doc = et.parse(buf.toString());",
+                            'var doc; try { ' + SOAP_FIX + 'doc = et.parse(fixXmlSoap(buf.toString())); } '
+                            'catch (e) { e.code = "EUPNP", console.error("[patch] unrepairable SOAP response XML:", e && e.message); return callback(e); }', 1)
+    changed.append("17a"); print("patch 17a: applied (line %d)" % (i+1))
+
+# b) device description: repair the parse and catch what is left
+if any("fixXmlDesc" in l for l in L): print("patch 17b: present")
+else:
+    i = one(lambda l: l.strip() == "var desc = (function(xml, url) {", "patch 17b open")
+    j = one(lambda l: 'var doc = et.parse(xml), desc = extractFields(doc.find("./device")' in l, "patch 17b parse")
+    k = one(lambda l: l.strip() == "})(body, self.url);", "patch 17b close")
+    assert i < j < k, (i, j, k)
+    L[i] = L[i].replace("var desc = (function(xml, url) {",
+                        "var desc; try { desc = (function(xml, url) { " + DESC_FIX, 1)
+    L[j] = L[j].replace("et.parse(xml)", "et.parse(fixXmlDesc(xml))", 1)
+    L[k] = L[k].replace("})(body, self.url);",
+                        '})(body, self.url); } catch (e) { e.code = "EUPNP", '
+                        'console.error("[patch] unreadable device description XML:", e && e.message); return callback(e); }', 1)
+    changed.append("17b"); print("patch 17b: applied (lines %d-%d)" % (i+1, k+1))
+
+# c) service description: same treatment
+if any("fixXmlSvc" in l for l in L): print("patch 17c: present")
+else:
+    SVC_FIX = FIX.replace("var fixXml", "var fixXmlSvc").replace("fixXml(", "fixXmlSvc(")
+    i = one(lambda l: l.strip() == "var desc = (function(xml) {", "patch 17c open")
+    j = one(lambda l: l.strip().startswith("var doc = et.parse(xml), desc = {"), "patch 17c parse")
+    k = one(lambda l: l.strip() == "})(body);", "patch 17c close")
+    assert i < j < k, (i, j, k)
+    L[i] = L[i].replace("var desc = (function(xml) {",
+                        "var desc; try { desc = (function(xml) { " + SVC_FIX, 1)
+    L[j] = L[j].replace("et.parse(xml)", "et.parse(fixXmlSvc(xml))", 1)
+    L[k] = L[k].replace("})(body);",
+                        '})(body); } catch (e) { e.code = "EUPNP", '
+                        'console.error("[patch] unreadable service description XML:", e && e.message); return callback(e); }', 1)
+    changed.append("17c"); print("patch 17c: applied (lines %d-%d)" % (i+1, k+1))
 
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
