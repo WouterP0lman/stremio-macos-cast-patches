@@ -232,6 +232,20 @@ It does not trust what the renderer says about itself. An LG 42LM760S answers
 whole film. The remote goes by whether the server is holding a source for that device,
 which is set when a cast starts and cleared when it ends.
 
+Two things had to be fixed before it worked in the app rather than in a browser.
+
+The page the shell loads carries a `last-modified` from months ago and no
+`cache-control`, so WebKit keeps it for days on heuristic freshness alone and never asks
+again. The app was therefore still rendering the version from before the patch, with no
+script in it. The injected response now says `no-store` and drops the validators, and the
+patch script clears that one cache once so the change is picked up.
+
+The position also sat still. The server learns where a TV is only from UPnP events, and
+most renderers send those on state changes rather than while playing, so the bar would
+have been frozen for the whole film. Patch 19 refreshes it from the renderer while
+something is playing, at most every two seconds, without making the status request wait
+for a TV that answers slowly. Measured after: 16:05, 16:12, 16:19.
+
 Verified against the LG: pressing a jump in the panel moved the film from 26:02 to 31:01
 on the TV, and the stream restarted at exactly the requested second.
 
@@ -401,6 +415,7 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 13 | dispatch line 42227 plus both `play()` methods | the requested start position survives the ffmpeg probe that runs before the device loads |
 | 14 | `castingUtils` line 22632, both `play()` methods | pick a subtitle automatically: the torrent's own .srt first, OpenSubtitles as fallback |
 | 18 | the UI proxy route, line 46856 | hand the interface a cast remote, and serve it from next to `server.js` |
+| 19 | `DLNAClient.status`, line 89028 | refresh the renderer's position while something plays, instead of waiting for events that never come |
 
 Editing a file inside the bundle breaks the code signature seal. The script re-signs the app ad hoc with `--preserve-metadata=entitlements,flags,identifier`, so the hardened runtime flag and entitlements stay. The Developer ID signature and notarization ticket no longer apply to the modified bundle. The app launches normally on macOS 26.5.1 after this. Backups of the original `server.js` and `_CodeSignature` are written to `backups/<timestamp>/` before every change.
 

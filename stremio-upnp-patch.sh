@@ -336,6 +336,33 @@ else:
         '} catch (e) {} }')
     changed.append(15); print("patch 15: applied (lines %d, %d)" % (at + 1, k + 1))
 
+# 19: keep the reported position of a DLNA renderer up to date.
+# The server only learns where a TV is from UPnP events, and most renderers send
+# those on state changes rather than while playing, so the position sits still for
+# the whole film. Refresh it while something is playing, at most every two seconds,
+# without making the status request wait for a renderer that answers slowly.
+OLD19 = 'DLNAClient.prototype.status = function() {\n        return Promise.resolve(this.mediaStatus);\n    }'
+NEW19 = ('DLNAClient.prototype.status = function() {\n'
+         '        var self = this;\n'
+         '        if (this.mediaStatus.source && !this._posBusy && Date.now() - (this._posAt || 0) > 2e3) {\n'
+         '            this._posBusy = true;\n'
+         '            Promise.resolve(this.player.getPositionAsync()).then(function (pos) {\n'
+         '                self._posBusy = false; self._posAt = Date.now();\n'
+         '                if (pos !== null && pos !== undefined) self._updateStatus({ CurrentTrackPosition: pos });\n'
+         '            }).catch(function () { self._posBusy = false; self._posAt = Date.now(); });\n'
+         '        }\n'
+         '        return Promise.resolve(this.mediaStatus);\n    }')
+if any("_posBusy" in l for l in L): print("patch 19: present")
+else:
+    # L holds lines without their newlines, so rejoin with them to match a
+    # multi-line anchor, then split the same way again.
+    whole = "\n".join(L)
+    if OLD19 not in whole: raise SystemExit("patch 19: anchor not found")
+    idx = whole.index(OLD19)
+    upto = whole[:idx].count("\n")
+    L[:] = whole.replace(OLD19, NEW19, 1).split("\n")
+    changed.append(19); print("patch 19: applied (line %d)" % (upto + 1))
+
 # 18: put the cast remote in the interface itself.
 # The shell does not load web.stremio.com directly, it loads it through this
 # server's own proxy, so the page can be handed one extra script on the way past.
@@ -356,13 +383,17 @@ NEW18 = ('enginefs.router.get("/cast-remote.js", function (req, res) { '
          'var wantsPage = /text\\/html/i.test(String(req.headers.accept || "")); '
          'if (!wantsPage) return next(); '
          'delete req.headers["accept-encoding"]; '
+         'delete req.headers["if-none-match"]; delete req.headers["if-modified-since"]; '
          'var chunks = [], isHtml = false, w = res.write, e = res.end, wh = res.writeHead; '
          'res.writeHead = function (code, a, b) { '
          'var hs = (a && typeof a === "object") ? a : (b && typeof b === "object" ? b : null); '
          'var ct = res.getHeader("content-type") || (hs && (hs["content-type"] || hs["Content-Type"])) || ""; '
          'isHtml = /text\\/html/i.test(String(ct)); '
-         'if (isHtml) { try { res.removeHeader("content-length"); } catch (x) {} '
-         'if (hs) { delete hs["content-length"]; delete hs["Content-Length"]; } } '
+         'if (isHtml) { try { res.removeHeader("content-length"); res.removeHeader("last-modified"); '
+         'res.removeHeader("etag"); res.setHeader("cache-control", "no-store"); } catch (x) {} '
+         'if (hs) { delete hs["content-length"]; delete hs["Content-Length"]; '
+         'delete hs["last-modified"]; delete hs["Last-Modified"]; delete hs["etag"]; delete hs["ETag"]; '
+         'hs["cache-control"] = "no-store"; } } '
          'return wh.apply(res, arguments); }; '
          'res.write = function (c, enc, cb) { if (!isHtml) return w.apply(res, arguments); '
          'if (c) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c, typeof enc === "string" ? enc : "utf8")); '
@@ -483,6 +514,12 @@ check_syntax && echo "syntax OK"
 if [ -f "$DIR/webui/cast-remote.js" ]; then
   cp "$DIR/webui/cast-remote.js" "$(dirname "$S")/cast-remote.js"
   echo "cast remote installed next to server.js"
+  # The interface page came without cache headers, so the app may be holding a copy
+  # from before the patch and would never see the remote. Drop that one cache.
+  for c in "$HOME/Library/Caches/com.westbridge.stremio5-mac/WebKit/NetworkCache" \
+           "$HOME/.cache/stremio5/NetworkCache"; do
+    [ -d "$c" ] && rm -rf "$c" && echo "cleared the app's page cache so the remote is picked up"
+  done
 fi
 if [ -n "$APP" ] && command -v codesign >/dev/null; then
   # editing a file inside the bundle breaks the code signature seal, so re-sign
