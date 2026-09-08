@@ -12,9 +12,27 @@ Tested on an LG 42LM760S (2012, NetCast DLNA renderer) and a Chromecast 3rd gen,
 ```bash
 git clone https://github.com/WouterP0lman/stremio-macos-cast-patches.git
 cd stremio-macos-cast-patches
-bash stremio-upnp-patch.sh          # quits Stremio, backs up, patches, re-signs, relaunches
+bash stremio-upnp-patch.sh          # stops Stremio, backs up, patches, re-signs, relaunches
 DRY=1 bash stremio-upnp-patch.sh    # only report which patches are missing
 ```
+
+### Other platforms
+
+The patches are plain JavaScript against a `server.js` that ships identically on every
+platform, so they apply anywhere. Only two things around them are macOS specific, and both
+are handled: the script searches the usual install locations on macOS, Windows and Linux,
+and re-signs the app bundle only where `codesign` exists. Point it at the file directly if
+your install lives somewhere else:
+
+```bash
+STREMIO_SERVER_JS=/path/to/server.js bash stremio-upnp-patch.sh
+```
+
+Two runtime details degrade gracefully off macOS rather than failing: the language
+preference and the episode id are read from the web UI's localStorage, whose location is
+probed per platform (`_uiDb()`), and the SQLite binary is looked up rather than assumed. If
+either is missing, subtitles that ship inside the torrent still work; only the
+OpenSubtitles fallback and the language preference go quiet. **Tested on macOS only.**
 
 A Stremio auto-update replaces the whole app bundle and removes the patches. Run the script again afterwards, or install the optional launchd watcher (see below).
 

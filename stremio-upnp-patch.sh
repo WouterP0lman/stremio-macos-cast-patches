@@ -27,11 +27,41 @@
 #                                        so casting has subtitles without any helper script or internet
 # A Stremio auto-update replaces server.js and removes all of this; just run the script again (or install launchd/).
 set -e
-APP=/Applications/Stremio.app
-S=${STREMIO_SERVER_JS:-$APP/Contents/MacOS/server.js}
 DIR=$(cd "$(dirname "$0")" && pwd)
+
+# Locate Stremio. The patches themselves are plain JavaScript and platform
+# independent; only finding the file and re-signing the bundle are not.
+APP=""
+find_server() {
+  local c
+  for c in \
+    /Applications/Stremio.app/Contents/MacOS/server.js \
+    "$HOME/Applications/Stremio.app/Contents/MacOS/server.js" \
+    "$LOCALAPPDATA/Programs/LNV/Stremio-4/server.js" \
+    "$PROGRAMFILES/Stremio/server.js" \
+    /opt/stremio/server.js \
+    /usr/lib/stremio/server.js \
+    "$HOME/.local/share/stremio/server.js" \
+    /usr/share/stremio/server.js
+  do
+    [ -f "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+S=${STREMIO_SERVER_JS:-$(find_server || true)}
+[ -n "$S" ] && [ -f "$S" ] || {
+  echo "Could not find Stremio's server.js. Point at it explicitly:"
+  echo "  STREMIO_SERVER_JS=/path/to/server.js bash $0"
+  exit 1
+}
+case "$S" in *"/Stremio.app/Contents/MacOS/"*) APP="${S%/Contents/MacOS/server.js}";; esac
 LIVE=1; [ -n "$DRY" ] && LIVE=; [ -n "$STREMIO_SERVER_JS" ] && LIVE=
-[ -f "$S" ] || { echo "server.js not found: $S"; exit 1; }
+
+# node: prefer the one Stremio ships, fall back to whatever is on PATH
+NODE=""
+for c in "$APP/Contents/MacOS/node" "$(dirname "$S")/node" "$(command -v node || true)"; do
+  [ -n "$c" ] && [ -x "$c" ] && { NODE="$c"; break; }
+done
 
 run_patch() {  # $1 = target file, $2 = "dry" or ""
 python3 - "$1" "$2" <<'PY'
@@ -203,7 +233,7 @@ else:
     changed.append(13); print("patch 13: applied (lines %d, %d, %d)" % (j+1, k+1, c+1))
 
 # 14: pick a subtitle automatically when casting; the file usually sits in the same torrent
-PICK = 'pickSubtitle: function (srcURL) { return new Promise(function (resolve) { try { var m = String(srcURL || "").match(/\\/([0-9a-f]{40})\\/(\\d+)/); if (!m) return resolve(null); var ih = m[1], idx = parseInt(m[2], 10), efs = __webpack_require__(172); var stem = function (n) { return String(n).replace(/^.*[\\/\\\\]/, "").replace(/\\.[^.]+$/, "").toLowerCase(); }; var vid = efs.getFilename(ih, idx); if (!vid) return resolve(null); var want = stem(vid), hits = []; for (var i = 0; i < 500; i++) { var n = efs.getFilename(ih, i); if (!n) break; if (i === idx || !/\\.(srt|ass|ssa|sub|vtt)$/i.test(n)) continue; var b = stem(n); if (b === want) { hits.push({ i: i, tag: "" }); } else if (b.indexOf(want + ".") === 0) { hits.push({ i: i, tag: b.slice(want.length + 1) }); } } if (!hits.length) return resolve(null); var done = function (h) { resolve({ index: h.i, url: "http://127.0.0.1:11470/" + ih + "/" + h.i, name: efs.getFilename(ih, h.i) }); }; var exact = hits.filter(function (h) { return !h.tag; }); if (hits.length === 1 || (exact.length && hits.length === exact.length)) return done(exact[0] || hits[0]); castingUtils.userSubtitleLang(function (lang) { var L = { eng: ["en", "eng", "english"], nld: ["nl", "nld", "dut", "dutch"], ger: ["de", "ger", "deu", "german"], fre: ["fr", "fre", "fra", "french"], spa: ["es", "spa", "spanish"], por: ["pt", "por", "portuguese"], ita: ["it", "ita", "italian"], pol: ["pl", "pol", "polish"] }, l = String(lang || "").toLowerCase(), tags = L[l] || [l]; for (var k in L) { if (L[k].indexOf(l) >= 0) { tags = L[k]; break; } } var byLang = hits.filter(function (h) { return tags.indexOf(h.tag) >= 0; }); done(byLang[0] || exact[0] || hits[0]); }); } catch (e) { console.error("[patch] pickSubtitle:", e && e.message); resolve(null); } }); }, userSubtitleLang: function (cb) { var self = castingUtils; if (self._langAt && Date.now() - self._langAt < 3e5) return cb(self._lang); try { var os = __webpack_require__(22), fs2 = __webpack_require__(1), path2 = __webpack_require__(5); var roots = [path2.join(os.homedir(), "Library/WebKit/com.westbridge.stremio5-mac/WebsiteData/Default"), path2.join(os.homedir(), "Library/WebKit/com.stremio.stremio-shell-macos/WebsiteData/Default")]; var db = null, walk = function (d, depth) { if (db || depth > 3) return; var ls = []; try { ls = fs2.readdirSync(d); } catch (e) { return; } ls.forEach(function (f) { if (db) return; var full = path2.join(d, f); if (f === "localstorage.sqlite3") { db = full; return; } try { if (fs2.statSync(full).isDirectory()) walk(full, depth + 1); } catch (e) {} }); }; roots.forEach(function (r) { walk(r, 0); }); if (!db) { self._lang = null, self._langAt = Date.now(); return cb(null); } child.execFile("/usr/bin/sqlite3", ["file:" + db + "?mode=ro", "SELECT hex(value) FROM ItemTable WHERE key=\'profile\';"], { timeout: 4e3, maxBuffer: 33554432 }, function (err, out) { var lang = null; try { if (!err && out.trim()) { var prof = JSON.parse(Buffer.from(out.trim(), "hex").toString("utf16le")), st = prof.settings || {}; if (!1 !== st.subtitlesAutoSelect) lang = st.subtitlesLanguage || null; } } catch (e) {} self._lang = lang, self._langAt = Date.now(); cb(lang); }); } catch (e) { self._lang = null, self._langAt = Date.now(); cb(null); } }, '
+PICK = 'pickSubtitle: function (srcURL) { return new Promise(function (resolve) { try { var m = String(srcURL || "").match(/\\/([0-9a-f]{40})\\/(\\d+)/); if (!m) return resolve(null); var ih = m[1], idx = parseInt(m[2], 10), efs = __webpack_require__(172); var stem = function (n) { return String(n).replace(/^.*[\\/\\\\]/, "").replace(/\\.[^.]+$/, "").toLowerCase(); }; var vid = efs.getFilename(ih, idx); if (!vid) return resolve(null); var want = stem(vid), hits = []; for (var i = 0; i < 500; i++) { var n = efs.getFilename(ih, i); if (!n) break; if (i === idx || !/\\.(srt|ass|ssa|sub|vtt)$/i.test(n)) continue; var b = stem(n); if (b === want) { hits.push({ i: i, tag: "" }); } else if (b.indexOf(want + ".") === 0) { hits.push({ i: i, tag: b.slice(want.length + 1) }); } } if (!hits.length) return resolve(null); var done = function (h) { resolve({ index: h.i, url: "http://127.0.0.1:11470/" + ih + "/" + h.i, name: efs.getFilename(ih, h.i) }); }; var exact = hits.filter(function (h) { return !h.tag; }); if (hits.length === 1 || (exact.length && hits.length === exact.length)) return done(exact[0] || hits[0]); castingUtils.userSubtitleLang(function (lang) { var L = { eng: ["en", "eng", "english"], nld: ["nl", "nld", "dut", "dutch"], ger: ["de", "ger", "deu", "german"], fre: ["fr", "fre", "fra", "french"], spa: ["es", "spa", "spanish"], por: ["pt", "por", "portuguese"], ita: ["it", "ita", "italian"], pol: ["pl", "pol", "polish"] }, l = String(lang || "").toLowerCase(), tags = L[l] || [l]; for (var k in L) { if (L[k].indexOf(l) >= 0) { tags = L[k]; break; } } var byLang = hits.filter(function (h) { return tags.indexOf(h.tag) >= 0; }); done(byLang[0] || exact[0] || hits[0]); }); } catch (e) { console.error("[patch] pickSubtitle:", e && e.message); resolve(null); } }); }, userSubtitleLang: function (cb) { var self = castingUtils; if (self._langAt && Date.now() - self._langAt < 3e5) return cb(self._lang); try { var os = __webpack_require__(22), fs2 = __webpack_require__(1), path2 = __webpack_require__(5); var roots = [path2.join(os.homedir(), "Library/WebKit/com.westbridge.stremio5-mac/WebsiteData/Default"), path2.join(os.homedir(), "Library/WebKit/com.stremio.stremio-shell-macos/WebsiteData/Default")]; var db = null, walk = function (d, depth) { if (db || depth > 3) return; var ls = []; try { ls = fs2.readdirSync(d); } catch (e) { return; } ls.forEach(function (f) { if (db) return; var full = path2.join(d, f); if (f === "localstorage.sqlite3") { db = full; return; } try { if (fs2.statSync(full).isDirectory()) walk(full, depth + 1); } catch (e) {} }); }; roots.forEach(function (r) { walk(r, 0); }); if (!db) { self._lang = null, self._langAt = Date.now(); return cb(null); } child.execFile(castingUtils._sqlite(), ["file:" + db + "?mode=ro", "SELECT hex(value) FROM ItemTable WHERE key=\'profile\';"], { timeout: 4e3, maxBuffer: 33554432 }, function (err, out) { var lang = null; try { if (!err && out.trim()) { var prof = JSON.parse(Buffer.from(out.trim(), "hex").toString("utf16le")), st = prof.settings || {}; if (!1 !== st.subtitlesAutoSelect) lang = st.subtitlesLanguage || null; } } catch (e) {} self._lang = lang, self._langAt = Date.now(); cb(lang); }); } catch (e) { self._lang = null, self._langAt = Date.now(); cb(null); } }, '
 if any("pickSubtitle: function" in l for l in L): print("patch 14a: present")
 else:
     i = one(lambda l: l.strip().startswith("getMime: function(mimeURL)"), "patch 14a")
@@ -233,7 +263,7 @@ else:
     changed.append("14c"); print("patch 14c: applied (line %d)" % (i+1))
 
 # 14d: fall back to OpenSubtitles when the torrent has no subtitle file of its own
-REMOTE = 'remoteSubtitle: function (ih, idx, lang, cb) { var self = castingUtils, done = false; var finish = function (r) { if (!done) { done = true; cb(r); } }; setTimeout(function () { finish(null); }, 12e3); try { self.videoIdFor(ih, idx, function (vid) { if (!vid) return finish(null); var base = "http://127.0.0.1:11470/" + ih + "/" + idx; fetch("http://127.0.0.1:11470/opensubHash?videoUrl=" + encodeURIComponent(base), { timeout: 9e3 }) .then(function (r) { return r.json(); }).catch(function () { return {}; }) .then(function (h) { var res = (h || {}).result || {}, extra = res.hash ? "/videoHash=" + res.hash + "&videoSize=" + res.size : ""; var kind = vid.indexOf(":") >= 0 ? "series" : "movie"; return fetch("https://opensubtitles-v3.strem.io/subtitles/" + kind + "/" + vid + extra + ".json", { timeout: 9e3, headers: { "User-Agent": "Stremio" } }).then(function (r) { return r.json(); }); }) .then(function (d) { var subs = (d || {}).subtitles || []; var L = { eng: ["en", "eng"], nld: ["nl", "nld", "dut"], ger: ["de", "ger", "deu"], fre: ["fr", "fre", "fra"], spa: ["es", "spa"], por: ["pt", "por", "pob"], ita: ["it", "ita"], pol: ["pl", "pol"] }; var l = String(lang || "").toLowerCase(), tags = L[l] || (l ? [l] : []); for (var k in L) { if (L[k].indexOf(l) >= 0) { tags = L[k]; break; } } var inLang = tags.length ? subs.filter(function (x) { return tags.indexOf(String(x.lang || "").toLowerCase()) >= 0; }) : subs; var exact = inLang.filter(function (x) { return x.m === "h"; }); var pick = exact[0] || inLang[0] || null; finish(pick ? { url: pick.url, name: pick.subtitleFileName || pick.id, remote: true, hashMatch: !!exact[0] } : null); }) .catch(function () { finish(null); }); }); } catch (e) { finish(null); } }, videoIdFor: function (ih, idx, cb) { try { var child2 = __webpack_require__(32), os2 = __webpack_require__(22), fs3 = __webpack_require__(1), path3 = __webpack_require__(5); var db = castingUtils._uiDb(); if (!db) return cb(null); child2.execFile("/usr/bin/sqlite3", ["file:" + db + "?mode=ro", "SELECT hex(value) FROM ItemTable WHERE key=\'streams\';"], { timeout: 5e3, maxBuffer: 67108864 }, function (err, out) { if (err || !out.trim()) return cb(null); try { var data = JSON.parse(Buffer.from(out.trim(), "hex").toString("utf16le")); var items = data.items || []; for (var i = 0; i < items.length; i++) { var k = items[i][0], v = items[i][1] || {}, st = v.stream || {}; if (st.infoHash === ih && st.fileIdx === idx) return cb(k && k.videoId); } cb(null); } catch (e) { cb(null); } }); } catch (e) { cb(null); } }, _uiDb: function () { try { var os2 = __webpack_require__(22), fs3 = __webpack_require__(1), path3 = __webpack_require__(5); if (castingUtils._db !== undefined) return castingUtils._db; var home = os2.homedir(), roots = []; if (process.platform === "darwin") { roots = [ path3.join(home, "Library/WebKit/com.westbridge.stremio5-mac/WebsiteData/Default"), path3.join(home, "Library/WebKit/com.stremio.stremio-shell-macos/WebsiteData/Default") ]; } else if (process.platform === "win32") { roots = [ path3.join(process.env.APPDATA || "", "stremio5/Local Storage"), path3.join(process.env.LOCALAPPDATA || "", "stremio5/Local Storage") ]; } else { roots = [ path3.join(home, ".local/share/stremio5"), path3.join(home, ".stremio5") ]; } var found = null, walk = function (d, depth) { if (found || depth > 3) return; var ls; try { ls = fs3.readdirSync(d); } catch (e) { return; } for (var i = 0; i < ls.length; i++) { if (found) return; var full = path3.join(d, ls[i]); if (/localstorage\\.sqlite3?$/i.test(ls[i])) { found = full; return; } try { if (fs3.statSync(full).isDirectory()) walk(full, depth + 1); } catch (e) {} } }; roots.forEach(function (r) { walk(r, 0); }); castingUtils._db = found; return found; } catch (e) { castingUtils._db = null; return null; } }, '
+REMOTE = 'remoteSubtitle: function (ih, idx, lang, cb) { var self = castingUtils, done = false; var finish = function (r) { if (!done) { done = true; cb(r); } }; setTimeout(function () { finish(null); }, 12e3); try { self.videoIdFor(ih, idx, function (vid) { if (!vid) return finish(null); var base = "http://127.0.0.1:11470/" + ih + "/" + idx; fetch("http://127.0.0.1:11470/opensubHash?videoUrl=" + encodeURIComponent(base), { timeout: 9e3 }) .then(function (r) { return r.json(); }).catch(function () { return {}; }) .then(function (h) { var res = (h || {}).result || {}, extra = res.hash ? "/videoHash=" + res.hash + "&videoSize=" + res.size : ""; var kind = vid.indexOf(":") >= 0 ? "series" : "movie"; return fetch("https://opensubtitles-v3.strem.io/subtitles/" + kind + "/" + vid + extra + ".json", { timeout: 9e3, headers: { "User-Agent": "Stremio" } }).then(function (r) { return r.json(); }); }) .then(function (d) { var subs = (d || {}).subtitles || []; var L = { eng: ["en", "eng"], nld: ["nl", "nld", "dut"], ger: ["de", "ger", "deu"], fre: ["fr", "fre", "fra"], spa: ["es", "spa"], por: ["pt", "por", "pob"], ita: ["it", "ita"], pol: ["pl", "pol"] }; var l = String(lang || "").toLowerCase(), tags = L[l] || (l ? [l] : []); for (var k in L) { if (L[k].indexOf(l) >= 0) { tags = L[k]; break; } } var inLang = tags.length ? subs.filter(function (x) { return tags.indexOf(String(x.lang || "").toLowerCase()) >= 0; }) : subs; var exact = inLang.filter(function (x) { return x.m === "h"; }); var pick = exact[0] || inLang[0] || null; finish(pick ? { url: pick.url, name: pick.subtitleFileName || pick.id, remote: true, hashMatch: !!exact[0] } : null); }) .catch(function () { finish(null); }); }); } catch (e) { finish(null); } }, videoIdFor: function (ih, idx, cb) { try { var child2 = __webpack_require__(32), os2 = __webpack_require__(22), fs3 = __webpack_require__(1), path3 = __webpack_require__(5); var db = castingUtils._uiDb(); if (!db) return cb(null); child2.execFile(castingUtils._sqlite(), ["file:" + db + "?mode=ro", "SELECT hex(value) FROM ItemTable WHERE key=\'streams\';"], { timeout: 5e3, maxBuffer: 67108864 }, function (err, out) { if (err || !out.trim()) return cb(null); try { var data = JSON.parse(Buffer.from(out.trim(), "hex").toString("utf16le")); var items = data.items || []; for (var i = 0; i < items.length; i++) { var k = items[i][0], v = items[i][1] || {}, st = v.stream || {}; if (st.infoHash === ih && st.fileIdx === idx) return cb(k && k.videoId); } cb(null); } catch (e) { cb(null); } }); } catch (e) { cb(null); } }, _sqlite: function () { if (castingUtils._sq !== undefined) return castingUtils._sq; var fs4 = __webpack_require__(1), c = ["/usr/bin/sqlite3", "/usr/local/bin/sqlite3", "/opt/homebrew/bin/sqlite3"]; castingUtils._sq = "sqlite3"; for (var i = 0; i < c.length; i++) { try { if (fs4.existsSync(c[i])) { castingUtils._sq = c[i]; break; } } catch (e) {} } return castingUtils._sq; }, _uiDb: function () { try { var os2 = __webpack_require__(22), fs3 = __webpack_require__(1), path3 = __webpack_require__(5); if (castingUtils._db !== undefined) return castingUtils._db; var home = os2.homedir(), roots = []; if (process.platform === "darwin") { roots = [ path3.join(home, "Library/WebKit/com.westbridge.stremio5-mac/WebsiteData/Default"), path3.join(home, "Library/WebKit/com.stremio.stremio-shell-macos/WebsiteData/Default") ]; } else if (process.platform === "win32") { roots = [ path3.join(process.env.APPDATA || "", "stremio5/Local Storage"), path3.join(process.env.LOCALAPPDATA || "", "stremio5/Local Storage") ]; } else { roots = [ path3.join(home, ".local/share/stremio5"), path3.join(home, ".stremio5") ]; } var found = null, walk = function (d, depth) { if (found || depth > 3) return; var ls; try { ls = fs3.readdirSync(d); } catch (e) { return; } for (var i = 0; i < ls.length; i++) { if (found) return; var full = path3.join(d, ls[i]); if (/localstorage\\.sqlite3?$/i.test(ls[i])) { found = full; return; } try { if (fs3.statSync(full).isDirectory()) walk(full, depth + 1); } catch (e) {} } }; roots.forEach(function (r) { walk(r, 0); }); castingUtils._db = found; return found; } catch (e) { castingUtils._db = null; return null; } }, '
 if any("remoteSubtitle: function" in l for l in L): print("patch 14d: present")
 else:
     i = one(lambda l: "pickSubtitle: function (srcURL)" in l, "patch 14d")
@@ -258,22 +288,35 @@ PY
 }
 
 # Pass 1: detect. A run with nothing to do must not restart Stremio.
+check_syntax() { [ -n "$NODE" ] && "$NODE" --check "$S" || { echo "(no node found, syntax not checked)"; return 0; }; }
 OUT=$(run_patch "$S" dry); echo "$OUT"
-if ! echo "$OUT" | grep -q "applied"; then "$APP/Contents/MacOS/node" --check "$S" && echo "syntax OK"; exit 0; fi
-[ -n "$DRY" ] && { "$APP/Contents/MacOS/node" --check "$S" && echo "syntax OK (dry run, nothing written)"; exit 0; }
+if ! echo "$OUT" | grep -q "applied"; then check_syntax && echo "syntax OK"; exit 0; fi
+[ -n "$DRY" ] && { check_syntax && echo "syntax OK (dry run, nothing written)"; exit 0; }
 if [ -z "$LIVE" ]; then   # copy mode: write to the copy, do not touch the app
   run_patch "$S" "" | grep -v "^patch" || true
-  "$APP/Contents/MacOS/node" --check "$S" && echo "syntax OK (copy mode, app untouched)"; exit 0
+  check_syntax && echo "syntax OK (copy mode, app untouched)"; exit 0
 fi
 
 # Pass 2: live apply.
 BK=$DIR/backups/$(date +%Y-%m-%d_%H%M%S)
-osascript -e 'tell application "Stremio" to quit' 2>/dev/null || true; sleep 2
-pkill -f "Stremio.app/Contents/MacOS" 2>/dev/null || true
-mkdir -p "$BK"; cp -p "$S" "$BK/server.js.orig"; cp -Rp "$APP/Contents/_CodeSignature" "$BK/"
+if [ -n "$APP" ]; then
+  osascript -e 'tell application "Stremio" to quit' 2>/dev/null || true; sleep 2
+  pkill -f "Stremio.app/Contents/MacOS" 2>/dev/null || true
+else
+  pkill -f "server\.js" 2>/dev/null || true
+  echo "Stremio stopped (close it yourself if it is still running)."
+fi
+mkdir -p "$BK"; cp -p "$S" "$BK/server.js.orig"
+[ -n "$APP" ] && [ -d "$APP/Contents/_CodeSignature" ] && cp -Rp "$APP/Contents/_CodeSignature" "$BK/"
 run_patch "$S" "" | grep -v "^patch" || true
-"$APP/Contents/MacOS/node" --check "$S" && echo "syntax OK"
-# The bundle seal now differs, so re-sign ad hoc (entitlements and hardened-runtime flag are preserved).
-codesign --force --sign - --preserve-metadata=entitlements,flags,identifier "$APP"
-xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
-open -a "$APP"; echo "done, backup in $BK"
+check_syntax && echo "syntax OK"
+if [ -n "$APP" ] && command -v codesign >/dev/null; then
+  # editing a file inside the bundle breaks the code signature seal, so re-sign
+  # ad hoc; entitlements and the hardened-runtime flag are preserved
+  codesign --force --sign - --preserve-metadata=entitlements,flags,identifier "$APP"
+  xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+  open -a "$APP"
+else
+  echo "Start Stremio again to pick up the changes."
+fi
+echo "done, backup in $BK"
