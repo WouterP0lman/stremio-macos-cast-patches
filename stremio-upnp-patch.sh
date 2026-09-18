@@ -500,6 +500,187 @@ else:
                         'console.error("[patch] unreadable service description XML:", e && e.message); return callback(e); }', 1)
     changed.append("17c"); print("patch 17c: applied (lines %d-%d)" % (i+1, k+1))
 
+# 23: let the transcoder speak MPEG-TS as well as Matroska.
+# A live Matroska stream has no index and no known length. Some TVs play it anyway
+# (an LG 42LM760S does); others refuse it. A Samsung Q80 (2019) lists video/x-mkv
+# among its formats and still stops with ERROR_OCCURRED on every live MKV stream,
+# while the same picture as MPEG-TS plays at once (test/renderer-probe.py shows it).
+# MPEG-TS is the format broadcast television is sent in, which is why renderers
+# handle it best. With ?ts=1 the transcoder produces it, and says what is true about
+# it: this stream cannot be seeked by byte range (DLNA.ORG_OP=00).
+W = "\n".join(L)
+if "isTS23" in W: print("patch 23: present")
+else:
+    reps23 = [
+        ('var isFMP4 = req.query.fmp4,',
+         'var isFMP4 = req.query.fmp4, isTS23 = "1" === String(req.query.ts),'),
+        ('"Content-Type": isFMP4 ? "video/mp4" : "video/x-mkv",',
+         '"Content-Type": isFMP4 ? "video/mp4" : isTS23 ? "video/mpeg" : "video/x-mkv",'),
+        ('"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01300000000000000000000000000000"',
+         '"contentFeatures.dlna.org": isTS23 ? "DLNA.ORG_OP=00;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01300000000000000000000000000000" '
+         ': "DLNA.ORG_OP=01;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01300000000000000000000000000000"'),
+        ('args.push("-f", isFMP4 ? "mp4" : "matroska", "-threads", "0", "pipe:1")',
+         'args.push("-f", isFMP4 ? "mp4" : isTS23 ? "mpegts" : "matroska", "-threads", "0", "pipe:1")'),
+    ]
+    for old, new in reps23:
+        if W.count(old) != 1: raise SystemExit("patch 23: anchor not unique: " + old[:70])
+        W = W.replace(old, new, 1)
+    L[:] = W.split("\n"); changed.append(23); print("patch 23: applied")
+
+# 24: find the format a TV can play, once, and remember it.
+# Every renderer was sent Matroska, and a TV that cannot play it just shows an
+# error. Guessing per brand does not scale, so ask the TV instead: start as before,
+# look once at what it reports, and when it stopped with an error, or refused the
+# stream outright, try MPEG-TS. Whatever played is stored per device in
+# cast-formats.json next to server-settings.json, so the next cast goes straight to
+# the right format and the TV is not asked again.
+#
+# Only a real refusal switches formats. A timeout says nothing about the format,
+# and a TV that never answers GetTransportInfo (the LG 42LM760S) keeps Matroska,
+# which it plays, and stops being asked after its second cast.
+W = "\n".join(L)
+if "_watchStart" in W: print("patch 24: present")
+else:
+    HELPERS24 = (
+        'DLNAClient.FLAG_DISABLE_UPDATES = 2, DLNAClient.PLAYBACK_DELAY = 3e3, '
+        'DLNAClient._fmtFile = function () { var p = __webpack_require__(5), h = process.env.HOME || process.env.USERPROFILE || ""; '
+        'var dir = process.env.SETTINGS_PATH || process.env.APP_PATH || (process.platform === "win32" '
+        '? p.join(process.env.APPDATA || h, "stremio", "stremio-server") : process.platform === "darwin" '
+        '? p.join(h, "Library", "Application Support", "stremio-server") : p.join(h, ".stremio-server")); '
+        'return p.join(dir, "cast-formats.json"); }, '
+        'DLNAClient._fmtAll = function () { if (!DLNAClient._fmtMem) { try { DLNAClient._fmtMem = '
+        'JSON.parse(__webpack_require__(1).readFileSync(DLNAClient._fmtFile(), "utf8")) || {}; } '
+        'catch (e) { DLNAClient._fmtMem = {}; } } return DLNAClient._fmtMem; }, '
+        'DLNAClient._fmtSave = function (id, rec) { if (!id) return; var fs24 = __webpack_require__(1), all; '
+        'try { all = JSON.parse(fs24.readFileSync(DLNAClient._fmtFile(), "utf8")) || {}; } catch (e) { all = {}; } '
+        'all[id] = rec; DLNAClient._fmtMem = all; '
+        'try { fs24.writeFile(DLNAClient._fmtFile(), JSON.stringify(all, null, 1), function () {}); } '
+        'catch (e) {} },')
+    WATCH24 = (
+        'DLNAClient.prototype._watchStart = function (fmt, token, want) { '
+        'var self = this, id = this.device && this.device.id, name = (this.device && this.device.name) || id, '
+        'rec = DLNAClient._fmtAll()[id] || {}; '
+        'if (rec.settled && rec.fmt === fmt) return; '
+        'var looks = 0, stopped = 0; '
+        'var retry = function (why) { '
+        'var sf = global.__castSourceFail; if (sf && sf.video === self.mediaStatus.source && Date.now() - sf.at < 3e4) { '
+        'console.log("[patch] " + name + ": the source could not be read, which is not about the format"); return; } '
+        'if (self._fellBack) { console.log("[patch] " + name + " played neither format (" + why + ")"); return; } '
+        'var next = fmt === "ts" ? "mkv" : "ts"; '
+        'console.log("[patch] " + name + " could not play " + fmt + " (" + why + "), trying " + next); '
+        'self._fellBack = true; self._fmt = next; self._absTime = undefined; self.mediaStatus.time = want; '
+        'Promise.resolve(self.playFromStatus()).catch(function () {}); }; '
+        'var check = function () { if (self._playToken !== token) return; looks++; '
+        'self.player.callAction("AVTransport", "GetTransportInfo", { InstanceID: 0 }, function (err, r) { '
+        'if (self._playToken !== token) return; '
+        'if (err || !r) { var misses = (rec.misses || 0) + 1; '
+        'DLNAClient._fmtSave(id, { fmt: fmt, name: name, misses: misses, settled: misses >= 2 }); return; } '
+        'var st = String(r.CurrentTransportState || ""), status = String(r.CurrentTransportStatus || ""); '
+        'if (st === "PLAYING" || st === "PAUSED_PLAYBACK") { DLNAClient._fmtSave(id, { fmt: fmt, name: name, settled: true }); return; } '
+        'if (status === "ERROR_OCCURRED") return retry("error"); '
+        'if ((st === "STOPPED" || st === "NO_MEDIA_PRESENT") && ++stopped >= 2) return retry("stopped"); '
+        'if (looks < 6) return void setTimeout(check, 3e3); '
+        'if (st === "TRANSITIONING") retry("never started"); }); }; '
+        'setTimeout(check, 4e3); }, ')
+    START24 = ('if (!this.mediaStatus.source) return Promise.reject("No source!");\n'
+               '        var rec24 = DLNAClient._fmtAll()[this.device && this.device.id] || {}; '
+               'this._fmt || (this._fmt = rec24.fmt || "mkv"); '
+               'var fmt24 = this._fmt, want24 = this.mediaStatus.time, token24 = this._playToken = (this._playToken || 0) + 1;')
+    AFTER24 = ('})).then(function (r24) { self._watchStart(fmt24, token24, want24); return r24; }, function (e24) { '
+               'if (e24 && e24.code === "EUPNP" && self._playToken === token24 && !self._fellBack) { '
+               'var next24 = fmt24 === "ts" ? "mkv" : "ts"; '
+               'console.log("[patch] renderer refused " + fmt24 + " (" + e24.message + "), trying " + next24); '
+               'self._fellBack = true; self._fmt = next24; self._absTime = undefined; self.mediaStatus.time = want24; '
+               'return self.playFromStatus(); } throw e24; });')
+    reps24 = [
+        ('DLNAClient.FLAG_DISABLE_UPDATES = 2, DLNAClient.PLAYBACK_DELAY = 3e3,', HELPERS24),
+        ('DLNAClient.prototype.playFromStatus = function() {', WATCH24 + 'DLNAClient.prototype.playFromStatus = function() {'),
+        ('if (!this.mediaStatus.source) return Promise.reject("No source!");', START24),
+        ('contentType: "video/x-mkv",', 'contentType: "ts" === fmt24 ? "video/mpeg" : "video/x-mkv",'),
+        ('ac3: this._canAc3 ? 1 : 0,', 'ac3: this._canAc3 ? 1 : 0, ts: "ts" === fmt24 ? 1 : 0,'),
+        ('this._absTime = undefined, this.mediaStatus.source = srcURL,',
+         'this._fellBack = false, this._fmt = undefined, this._absTime = undefined, this.mediaStatus.source = srcURL,'),
+    ]
+    for old, new in reps24:
+        if W.count(old) != 1: raise SystemExit("patch 24: anchor not unique: " + old[:70])
+        W = W.replace(old, new, 1)
+    at = W.index("self.player.loadAsync(proxySrv, options);")
+    close = W.index("}));", at)
+    if close - at > 60: raise SystemExit("patch 24: load anchor moved")
+    W = W[:close] + AFTER24 + W[close + 4:]
+    L[:] = W.split("\n"); changed.append(24); print("patch 24: applied")
+
+# 25: keep track of where the film is, and resume from there.
+# The server only knew where a cast started. A DLNA TV does not report its
+# position unless asked, and asking it constantly jams at least one of them (the
+# LG 42LM760S). So every restart that is not a seek (a subtitle, its timing, an
+# audio track) went back to where the cast began: add a subtitle twenty minutes in
+# and the film jumps back twenty minutes. A seek made while the TV was paused or
+# still starting up was dropped altogether, because seek() only acted in state 3.
+#
+# The server now keeps its own clock: anchored when a stream starts, held while
+# paused (by the remote or by the TV's own buttons), read out in every status. A
+# restart that is not a seek first asks the TV once where it is and uses that when
+# the answer comes in time, the clock otherwise. A seek is honoured whenever there
+# is something playing.
+W = "\n".join(L)
+if "_catchUp" in W: print("patch 25: present")
+else:
+    CLOCK25 = (
+        'DLNAClient.prototype._estimate = function () { if (!this._t0) return this.mediaStatus.time; '
+        'var now = Date.now(), held = this._pauseAt ? now - this._pauseAt : 0; '
+        'var t = (this._pos0 || 0) + Math.max(0, now - this._t0 - (this._pausedFor || 0) - held); '
+        'if (this.mediaStatus.length) t = Math.min(t, this.mediaStatus.length); return Math.round(t); }, '
+        'DLNAClient.prototype._anchor = function (pos) { this._t0 = Date.now(); this._pos0 = Number(pos) || 0; '
+        'this._pausedFor = 0; this._pauseAt = this._pauseAt ? Date.now() : null; }, '
+        'DLNAClient.prototype._mapTime = function (sec) { var _t = 1e3 * parseInt(sec, 10), _s = this.seekTime || 0; '
+        'if (isNaN(_t)) return null; '
+        'if (_s > 3e4 && this._absTime === undefined && _t >= 5e3) this._absTime = _t >= _s - 5e3; '
+        'return this._absTime === true ? _t : (this._absTime === false ? _s + _t : (_t >= _s ? _t : _s + _t)); }, '
+        'DLNAClient.prototype._catchUp = function () { var self = this; '
+        'if (!this._t0 || (this.stateFlags & DLNAClient.FLAG_DISABLE_UPDATES)) return; '
+        'this.mediaStatus.time = this._estimate(); '
+        'var due = Date.now() + DLNAClient.PLAYBACK_DELAY - 300; '
+        'try { this.player.getPosition(function (e, sec) { '
+        'if (e || sec === null || sec === undefined || Date.now() > due) return; '
+        'var t = self._mapTime(sec); if (t !== null && t > 0) self.mediaStatus.time = t; }); } catch (e) {} }, '
+        'DLNAClient.prototype.status = function() {\n'
+        '        if (this.mediaStatus.source && this._t0 && !(this.stateFlags & DLNAClient.FLAG_DISABLE_UPDATES)) '
+        'this.mediaStatus.time = this._estimate();\n'
+        '        return Promise.resolve(this.mediaStatus);\n    }')
+    reps25 = [
+        ('DLNAClient.prototype.status = function() {\n        return Promise.resolve(this.mediaStatus);\n    }', CLOCK25),
+        ('this.mediaStatus.paused = 4 == this.mediaStatus[field];\n            break;',
+         'this.mediaStatus.paused = 4 == this.mediaStatus[field];\n'
+         '            if (4 == this.mediaStatus[field]) this._pauseAt || (this._pauseAt = Date.now()); '
+         'else if (3 == this.mediaStatus[field] && this._pauseAt) { this._pausedFor = (this._pausedFor || 0) + '
+         '(Date.now() - this._pauseAt); this._pauseAt = null; }\n            break;'),
+        ('return this.mediaStatus.source ? (this.mediaStatus.subtitlesSrc = subsURL,',
+         'return this.mediaStatus.source ? (this._catchUp(), this.mediaStatus.subtitlesSrc = subsURL,'),
+        ('this.mediaStatus.source ? (this.mediaStatus.audioTrack = audioTrack,',
+         'this.mediaStatus.source ? (this._catchUp(), this.mediaStatus.audioTrack = audioTrack,'),
+        ('DLNAClient.prototype.resume = function() {\n        return this._simplePlayerCommand("playAsync");',
+         'DLNAClient.prototype.resume = function() {\n        return this._pauseAt && (this._pausedFor = '
+         '(this._pausedFor || 0) + (Date.now() - this._pauseAt), this._pauseAt = null), '
+         'this._simplePlayerCommand("playAsync");'),
+        ('DLNAClient.prototype.pause = function() {\n        return this._simplePlayerCommand("pauseAsync");',
+         'DLNAClient.prototype.pause = function() {\n        return this._pauseAt || (this._pauseAt = Date.now()), '
+         'this._simplePlayerCommand("pauseAsync");'),
+        ('return 3 != this.mediaStatus.state ? this.status() : (this.mediaStatus.time = parseInt(time, 10), \n'
+         '        this.delayedPlayFromStatus());',
+         'return this.mediaStatus.source ? (this.mediaStatus.time = parseInt(time, 10), this._pauseAt = null, '
+         'this.mediaStatus.paused = !1, \n        this.delayedPlayFromStatus()) : this.status();'),
+        ('.then(function (r24) { self._watchStart(fmt24, token24, want24); return r24; }',
+         '.then(function (r24) { self._anchor(self.seekTime || 0); self._watchStart(fmt24, token24, want24); return r24; }'),
+        ('console.log("Transcoding error:", e), res.end(e.message);',
+         'console.log("Transcoding error:", e), global.__castSourceFail = { video: req.query.video, at: Date.now() }, '
+         'res.end(e.message);'),
+    ]
+    for old, new in reps25:
+        if W.count(old) != 1: raise SystemExit("patch 25: anchor not unique: " + old[:70].replace("\n", "\\n"))
+        W = W.replace(old, new, 1)
+    L[:] = W.split("\n"); changed.append(25); print("patch 25: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)

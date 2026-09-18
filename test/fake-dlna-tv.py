@@ -33,6 +33,8 @@ Options:
   --relative     report position as time since Play instead of the point in the
                  film, the way some renderers do. The server has to land on the
                  same absolute position either way.
+  --no-mkv       refuse a live Matroska stream with ERROR_OCCURRED and play MPEG-TS,
+                 the way a Samsung Q80 does. The server should switch by itself.
   --state-file F write what the TV was told to F as JSON, for automated tests
   --port N       HTTP port (default 47000)
 
@@ -44,6 +46,7 @@ import http.server, socket, socketserver, struct, sys, threading, time, urllib.p
 PORT = 47000
 BROKEN = "--broken-xml" in sys.argv
 RELATIVE = "--relative" in sys.argv          # report time since play, not the absolute point
+NO_MKV = "--no-mkv" in sys.argv              # refuse live Matroska, like a Samsung Q80 does
 STATE_FILE = None
 if "--state-file" in sys.argv:
     STATE_FILE = sys.argv[sys.argv.index("--state-file") + 1]
@@ -167,7 +170,7 @@ def _save():
         with open(STATE_FILE, "w", encoding="utf-8") as fh:
             json.dump({"uri": state.get("uri"), "transport": state.get("transport"),
                        "position": state.get("position"),
-                       "relative": RELATIVE,
+                       "relative": RELATIVE, "status": state.get("status"),
                        "events": [[n, {k: v[0] for k, v in q.items()}] for n, q in state["events"]]},
                       fh, indent=1)
     except Exception:
@@ -257,6 +260,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             uri = html.unescape(m.group(1)) if m else ""
             state["uri"] = uri
             state["transport"] = "STOPPED"
+            state["status"] = "OK"
             print("\n  [fake tv] SetAVTransportURI")
             q = urllib.parse.parse_qs(urllib.parse.urlparse(uri).query, keep_blank_values=True)
             for k in ("video", "time", "audioTrack", "subtitles", "subtitlesDelay"):
@@ -268,8 +272,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(envelope(action, svc, ""))
 
         if action == "Play":
-            state["transport"] = "PLAYING"; state["started"] = time.time()
             q = urllib.parse.parse_qs(urllib.parse.urlparse(state["uri"]).query, keep_blank_values=True)
+            if NO_MKV and q.get("ts", ["0"])[0] != "1":
+                # what a Samsung Q80 does with a live MKV stream: accept the URI, try, give up
+                state["transport"] = "STOPPED"; state["status"] = "ERROR_OCCURRED"
+                print("  [fake tv] Play refused: cannot play this stream as Matroska")
+                _save()
+                return self._send(envelope(action, svc, ""))
+            state["transport"] = "PLAYING"; state["status"] = "OK"; state["started"] = time.time()
             state["position"] = float(q.get("time", ["0"])[0] or 0)
             print(f"  [fake tv] Play, starting at {hms(state['position'])}")
             _save()
@@ -283,7 +293,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if action == "GetTransportInfo":
             return self._send(envelope(action, svc,
                 f"<CurrentTransportState>{state['transport']}</CurrentTransportState>"
-                "<CurrentTransportStatus>OK</CurrentTransportStatus><CurrentSpeed>1</CurrentSpeed>"))
+                f"<CurrentTransportStatus>{state.get('status', 'OK')}</CurrentTransportStatus><CurrentSpeed>1</CurrentSpeed>"))
 
         if action == "GetPositionInfo":
             elapsed = time.time() - state["started"] if state["transport"] == "PLAYING" else 0

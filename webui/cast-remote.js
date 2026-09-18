@@ -29,6 +29,28 @@
     var collapsed = false;
     var scrubbing = false;
 
+    /* Closing the remote hides it for that one cast. It stays closed while that
+     * cast runs, also after a reload, and comes back for the next cast or when this
+     * one has really ended. Stopping the TV is a separate, deliberate action. */
+    var DISMISS_KEY = 'stremio-cast-remote-closed';
+    var dismissedMem = '';
+    var gone = 0;
+
+    function castKey(d, s) {
+        return (d && d.id) + '|' + String((s && s.source) || '').split('?')[0];
+    }
+
+    function dismissed() {
+        try { return localStorage.getItem(DISMISS_KEY) || ''; } catch (e) { return dismissedMem; }
+    }
+
+    function setDismissed(k) {
+        dismissedMem = k || '';
+        try {
+            if (k) localStorage.setItem(DISMISS_KEY, k); else localStorage.removeItem(DISMISS_KEY);
+        } catch (e) {}
+    }
+
     /* ---------- talking to the server ---------- */
 
     function get(path) {
@@ -69,7 +91,7 @@
 
     function findDevice() {
         return get('/casting').then(function (list) {
-            if (!Array.isArray(list)) return null;
+            if (!Array.isArray(list)) return { any: null, hit: null };
             var now = Date.now();
             var candidates = list.filter(function (d) {
                 if (d.type !== 'tv' && d.type !== 'chromecast') return false;
@@ -90,13 +112,24 @@
                 });
             });
             return Promise.all(checks).then(function (found) {
-                return found.filter(Boolean)[0] || null;
+                found = found.filter(Boolean);
+                var closed = dismissed();
+                return {
+                    any: found.length > 0,
+                    hit: found.filter(function (f) { return castKey(f.device, f.state) !== closed; })[0] || null
+                };
             });
         });
     }
 
     function pollDevice() {
-        findDevice().then(function (hit) {
+        findDevice().then(function (res) {
+            var hit = res.hit;
+            if (res.any === false) {
+                if (++gone >= 2 && dismissed()) setDismissed('');
+            } else if (res.any) {
+                gone = 0;
+            }
             if (hit) {
                 if (!device || device.id !== hit.device.id) {
                     device = hit.device;
@@ -348,9 +381,19 @@
         delayTimer = setTimeout(function () { delayTarget = null; command({ subtitlesDelay: 0 }); }, 300);
     }
 
+    function closeRemote() {
+        setDismissed(castKey(device, state));
+        device = null; state = {}; held = null; subtitleOptions = null;
+        render();
+    }
+
+    /* An empty source is the server's own way of ending a cast: it stops the TV and
+     * forgets what was playing. A plain stop left the source in place, so the cast
+     * looked alive and the remote came straight back. */
     function stopCasting() {
-        command({ stop: 1 });
-        device = null; state = {}; held = null;
+        setDismissed(castKey(device, state));
+        command({ source: '' });
+        device = null; state = {}; held = null; subtitleOptions = null;
         render();
     }
 
@@ -400,6 +443,9 @@
         'border-radius:50%;background:#fff}',
         '.delay{font-variant-numeric:tabular-nums;font-size:12px;flex:1;text-align:center;color:rgba(255,255,255,.75)}',
         '.delay.reset{cursor:pointer;text-decoration:underline}',
+        '.row.end{justify-content:flex-end;margin-top:12px}',
+        '.row.end .btn{background:transparent;border:1px solid rgba(255,255,255,.18);color:rgba(255,255,255,.8)}',
+        '.row.end .btn:hover{border-color:rgba(255,120,120,.6);color:#ff9a9a}',
         '.delay.reset:hover{color:#fff}'
     ].join('');
 
@@ -457,7 +503,7 @@
         nm.textContent = 'Casting to ' + device.name;
         head.appendChild(nm);
         head.appendChild(iconBtn('▾', 'Collapse', function () { collapsed = true; render(); }));
-        head.appendChild(iconBtn('✕', 'Stop casting', stopCasting));
+        head.appendChild(iconBtn('✕', 'Close the remote (the TV keeps playing)', closeRemote));
         panel.appendChild(head);
 
         var title = el('div', 'title');
@@ -549,6 +595,10 @@
         delayRow.appendChild(btn('Later', 'Show the subtitles half a second later',
             function () { nudgeSubtitles(500); }));
         panel.appendChild(delayRow);
+
+        var endRow = el('div', 'row end');
+        endRow.appendChild(btn('Stop casting', 'Stop the film on the TV', stopCasting));
+        panel.appendChild(endRow);
     }
 
     /* The player puts its own controls along the bottom, so lift the panel clear of

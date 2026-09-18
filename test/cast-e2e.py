@@ -23,6 +23,8 @@ FFMPEG = os.environ.get("FFMPEG", os.path.join(APP, "ffmpeg"))
 FFPROBE = os.environ.get("FFPROBE", os.path.join(APP, "ffprobe"))
 SERVER = os.environ.get("STREMIO_URL", "http://127.0.0.1:11470")
 CACHE = os.path.join(tempfile.gettempdir(), "stremio-cast-e2e")
+FORMATS = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
+                       "stremio-server", "cast-formats.json")
 SEEK_S = 205                      # past the 30s mark where the server may learn the renderer
 PASS, FAIL = [], []
 
@@ -126,7 +128,7 @@ def wait_device(want, deadline=40):
 
 def probe(path):
     out = subprocess.run([FFPROBE, "-v", "error", "-of", "json",
-                          "-show_entries", "format=start_time:stream=codec_type,codec_name",
+                          "-show_entries", "format=start_time,format_name:stream=codec_type,codec_name",
                           path], capture_output=True, text=True).stdout
     try: return json.loads(out)
     except Exception: return {}
@@ -175,13 +177,16 @@ def grab(url, mode, tag, cap=3_000_000):
 
 def run(mode, media_port):
     relative = mode == "relative"
-    print("\n  %s renderer" % ("relatieve" if relative else "absolute"))
+    picky = mode == "no-mkv"
+    print("\n  %s" % {"absolute": "absolute renderer", "relative": "relatieve renderer",
+                        "no-mkv": "renderer die live MKV weigert, zoals een Samsung Q80"}[mode])
     tag = "e2e-%s-%d" % (mode, os.getpid())
     state_file = os.path.join(CACHE, "tv-%s.json" % mode)
     if os.path.exists(state_file): os.remove(state_file)
     env = dict(os.environ, PYTHONUNBUFFERED="1", FAKE_TV_ID=tag)
     args = [sys.executable, os.path.join(HERE, "fake-dlna-tv.py"), "--state-file", state_file]
     if relative: args.append("--relative")
+    if picky: args.append("--no-mkv")
     tv = subprocess.Popen(args, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     dev = None
     try:
@@ -195,10 +200,16 @@ def run(mode, media_port):
 
         post("/casting/%s/player?%s" % (dev, urllib.parse.urlencode(
             {"source": src, "time": SEEK_S * 1000})))
-        st = read_state(state_file, 1)
+        st = read_state(state_file, 1, deadline=45 if picky else 25)
         if not st or not st.get("uri"):
             bad("%s: the TV was never told to play" % mode); return
         told = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(st["uri"]).query))
+        if picky:
+            if st.get("transport") == "PLAYING" and told.get("ts") == "1":
+                ok("%s: the server saw the refusal and switched to MPEG-TS by itself" % mode)
+            else:
+                bad("%s: the TV is not playing, the server did not switch formats (%s)"
+                    % (mode, st.get("status"))); return
         if abs(float(told.get("time") or -1) - SEEK_S) < 1.5:
             ok("%s: cast starts at %ds, as asked" % (mode, SEEK_S))
         else:
@@ -208,7 +219,14 @@ def run(mode, media_port):
         if not plain:
             bad("%s: the stream the TV was handed carries no data" % mode)
         else:
-            start = float(probe(plain).get("format", {}).get("start_time") or -1)
+            info = probe(plain)
+            container = info.get("format", {}).get("format_name") or "?"
+            want_container = "mpegts" if picky else "matroska"
+            if want_container in container:
+                ok("%s: the stream arrives as %s" % (mode, "MPEG-TS" if picky else "Matroska"))
+            else:
+                bad("%s: the stream arrives as %s instead of %s" % (mode, container, want_container))
+            start = float(info.get("format", {}).get("start_time") or -1)
             if abs(start - SEEK_S) < 3:
                 ok("%s: the stream itself starts at %.0fs, so the TV shows the right point"
                    % (mode, start))
@@ -220,23 +238,29 @@ def run(mode, media_port):
                 bad("%s: something is drawn before any subtitle was asked for" % mode)
 
         # The interface sends the subtitle in a second call, so the server has to
-        # keep its place across the restart that burning one in costs.
-        time.sleep(6)
+        # keep its place across the restart that burning one in costs. Wait long
+        # enough that going back to the start of the cast would show.
+        time.sleep(14)
+        casts = len(st.get("events") or [])
         post("/casting/%s/player?subtitlesSrc=%s" % (dev, urllib.parse.quote(sub, safe="")))
-        st2 = read_state(state_file, 2)
+        st2 = read_state(state_file, casts + 1)
         ev = [e for e in (st2 or {}).get("events") or [] if e[0] == "SetAVTransportURI"]
-        if len(ev) < 2:
+        if len(ev) < casts + 1:
             bad("%s: adding a subtitle never reached the TV" % mode); return
+        if picky and ev[-1][1].get("ts") != "1":
+            bad("%s: the next restart forgot the format that works" % mode)
         told2 = ev[-1][1]
         if told2.get("subtitles"):
             ok("%s: the subtitle travels with the stream" % mode)
         else:
             bad("%s: no subtitle in the second cast URL" % mode)
         again = float(told2.get("time") or -1)
-        if SEEK_S - 2 <= again <= SEEK_S + 60:
-            ok("%s: it resumes at %.0fs, where the film was" % (mode, again))
+        if SEEK_S + 10 <= again <= SEEK_S + 40:
+            ok("%s: it resumes at %.0fs, where the film had got to" % (mode, again))
+        elif again < SEEK_S + 10:
+            bad("%s: it jumps back to %.0fs, where the cast began, instead of %d+" % (mode, again, SEEK_S + 10))
         else:
-            bad("%s: it resumes at %.0fs instead of near %ds" % (mode, again, SEEK_S))
+            bad("%s: it resumes at %.0fs, further than the film had got" % (mode, again))
 
         withsub = grab(st2["uri"], mode, "sub")
         if not withsub:
@@ -263,14 +287,35 @@ def run(mode, media_port):
             bad("%s: Stremio reports %.0fs, it lost the starting point" % (mode, rep / 1000.0))
         else:
             bad("%s: Stremio reports %.0fs, far past the truth" % (mode, rep / 1000.0))
+        if picky:
+            try:
+                rec = json.load(open(FORMATS)).get(dev) or {}
+            except Exception:
+                rec = {}
+            if rec.get("fmt") == "ts" and rec.get("settled"):
+                ok("%s: remembered, the next cast goes straight to MPEG-TS" % mode)
+            else:
+                bad("%s: the format that works was not remembered (%s)" % (mode, rec))
     finally:
         try:
-            if dev: post("/casting/%s/player?stop=1" % dev, timeout=10)
+            # an empty source is a real close; a plain stop leaves the cast looking alive
+            if dev: post("/casting/%s/player?source=" % dev, timeout=15)
         except Exception: pass
         tv.terminate()
         try: tv.wait(timeout=5)
         except Exception: tv.kill()
         time.sleep(2)
+
+
+def forget_test_devices():
+    """Leave no fake TVs behind among the formats real devices need."""
+    try:
+        all_ = json.load(open(FORMATS))
+        keep = {k: v for k, v in all_.items() if (v or {}).get("name") != "Fake Test TV"}
+        if len(keep) != len(all_):
+            json.dump(keep, open(FORMATS, "w"), indent=1)
+    except Exception:
+        pass
 
 
 def main():
@@ -286,10 +331,11 @@ def main():
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
-        for mode in ("absolute", "relative"):
+        for mode in ("absolute", "relative", "no-mkv"):
             run(mode, port)
     finally:
         httpd.shutdown()
+        forget_test_devices()
     print("\n  %d ok, %d mislukt" % (len(PASS), len(FAIL)))
     print("  PASS: casten werkt van begin tot eind" if not FAIL else "  FAIL: zie hierboven")
     return 1 if FAIL else 0

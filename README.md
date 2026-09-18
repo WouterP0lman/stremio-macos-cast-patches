@@ -221,7 +221,9 @@ puts a remote on screen:
   this exact release and need no shifting, then what OpenSubtitles has, with an exact
   match marked
 - subtitle timing, half a second at a time, in both directions, and back in step in one click
-- stop casting
+- stop casting, as its own button: it ends the cast on the server as well, so the remote does not come back
+- close the remote with the cross while the TV keeps playing; it stays closed for that cast, also after a
+  reload, and shows up again for the next one
 
 Presses are gathered up rather than sent one by one. Three quick jumps become one command
 of ninety seconds instead of three transcode restarts, and the panel shows where you are
@@ -411,12 +413,62 @@ chance to drop the custom shifter from patch 10. Measured first, and it underflo
 offset of -5000 ms turns a cue at `00:00:02,136` into `23:59:57,136` instead of clamping at
 zero. Patch 10 clamps, so it stays.
 
+## Patches 23 and 24: every TV gets a format it can play
+
+Every renderer was sent the same thing: a live Matroska stream. An LG 42LM760S plays it.
+A Samsung Q80 (QE55Q80R, Tizen 2019) does not. It lists `video/x-mkv` among the 292
+formats it reports through `GetProtocolInfo`, accepts the stream, asks for it twice with
+a HEAD and a GET, and stops with `ERROR_OCCURRED`. Its format list is no guide to what it
+can take as a live stream.
+
+`test/renderer-probe.py` finds out by trying. It serves one test clip in a few ways, each
+exactly as a live transcode would, tells the TV to play it, and records what the TV asked
+for and whether it played:
+
+| Variant | Samsung Q80 |
+|---|---|
+| Matroska, headers as Stremio sends them | STOPPED, ERROR_OCCURRED |
+| Matroska, header admits it cannot seek (`DLNA.ORG_OP=00`) | STOPPED, ERROR_OCCURRED |
+| MPEG-TS, `video/mpeg` | PLAYING within two seconds |
+| fragmented MP4 | still TRANSITIONING after fifteen |
+
+MPEG-TS is the format broadcast television is sent in, which is why renderers handle it
+best. Patch 23 teaches the transcoder to produce it with `?ts=1`.
+
+Patch 24 decides per device, because no list of brands will ever be complete. A cast
+starts as it always did. Four seconds later the server asks the TV once what it is doing.
+If it stopped with an error, or refused the stream outright with a UPnP fault, the server
+switches to MPEG-TS and restarts at the same point. What played is stored in
+`cast-formats.json` next to `server-settings.json`, so the next cast goes straight to the
+right format and the TV is not asked again. On the Samsung that is the difference between
+the first cast (picture after 18 seconds) and every cast after it (picture within 6).
+
+Two things keep this from doing harm. A timeout says nothing about the format, so only a
+real refusal switches; the LG, which never answers `GetTransportInfo`, keeps Matroska and
+stops being asked after its second cast. And a source that could not be read is not a
+format problem: when the transcoder failed to open the source, the server does not switch.
+
+## Patch 25: resume where you were
+
+The server only knew where a cast began. A DLNA TV does not report its position unless
+asked, and asking constantly jams at least one of them. So every restart that is not a
+seek went back to the start of the cast: add a subtitle twenty minutes in and the film
+jumped back twenty minutes. Measured on the Samsung before the patch: a subtitle added
+33 seconds in restarted the stream at 205s, the point the cast began.
+
+The server now keeps its own clock. It starts when a stream starts, stops while the film
+is paused, whether by the remote or by the TV's own buttons, and every status reads from
+it. A subtitle, a subtitle timing or an audio track change first asks the TV once where it
+is and uses that answer when it comes in time. Measured after: the same change 33 seconds
+in restarts at 234s. A seek is also honoured while the TV is paused or still starting,
+where `seek()` used to act only in state 3 and dropped it otherwise.
+
 ## Smaller findings
 
 - `-vbsf` was removed in ffmpeg 7. The legacy HLSv1 DLNA MPEG-TS route (`segmentApi.DLNAMpegTtsMiddleware`) passes `-vbsf h264_mp4toannexb` and exits with code 8. Not on the Stremio 5 cast path. Patch 5 changes it to `-bsf:v`.
 - `videoApi.probeVideo` (HLSv1) has a second stderr parser. It still finds the stream index with ffmpeg 7 but loses the language tag on `[0x..]` lines. Cosmetic, not patched.
 - The eventing server never answers NOTIFY requests with HTTP 200 (`res.end()` is never called). Pre-existing, not patched.
-- The DLNA path advertises and serves `video/x-mkv`, the LG only lists `video/x-matroska:*`. The TV tolerates it. Not patched.
+- The DLNA path advertises and serves `video/x-mkv`, the LG only lists `video/x-matroska:*`. The LG tolerates it. A Samsung does not play live Matroska at all, see patches 23 and 24.
 - Language tags that are not exactly three word characters (`(en)`, `(pt-BR)`) still fail the regex. ffmpeg 7.1.1 prints ISO 639-2 codes for Matroska and mp4, so this only affects unusual files.
 
 ## What the script changes
@@ -442,6 +494,9 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 18 | the UI proxy route, line 46856 | hand the interface a cast remote, and serve it from next to `server.js` |
 | 20 | `DeviceClient.callAction`, line 89394 | give every UPnP call a six second deadline, so a quiet renderer cannot hang it for good |
 | 22 | `DLNAClient.init`, line 89018 | answer the first status straight away, and never write the renderer's idle position over the position that was just asked for |
+| 23 | `Casting.prototype.transcode`, line 83035 | with `?ts=1`, produce MPEG-TS instead of Matroska, with a content-features header that admits the stream cannot be seeked |
+| 24 | `DLNAClient.playFromStatus` | start in Matroska, look once at what the TV reports, switch to MPEG-TS when it refuses, and remember per device what played |
+| 25 | `DLNAClient` status, subtitles, audio track, pause, seek | keep a clock of where the film is, so a subtitle change resumes where you were and a seek is honoured while paused |
 
 Editing a file inside the bundle breaks the code signature seal. The script re-signs the app ad hoc with `--preserve-metadata=entitlements,flags,identifier`, so the hardened runtime flag and entitlements stay. The Developer ID signature and notarization ticket no longer apply to the modified bundle. The app launches normally on macOS 26.5.1 after this. Backups of the original `server.js` and `_CodeSignature` are written to `backups/<timestamp>/` before every change.
 
@@ -519,6 +574,16 @@ Two things about this TV that are worth knowing and are not patched: it answers
 device that has gone away, so a device list can fill up with renderers that no longer
 exist.
 
+Confirmed on a Samsung Q80 (QE55Q80R) on 18 September 2026, through Stremio's own pipeline:
+
+| Step | Result |
+|---|---|
+| first cast | Matroska refused, switch logged, MPEG-TS playing after 18 seconds |
+| second cast | straight to MPEG-TS, playing within 6 seconds |
+| subtitle added 33 seconds in | restarts at 234s with the subtitle burned in |
+| 30 seconds forward | restarts 30 seconds on, still MPEG-TS |
+| Stop casting | TV stopped, the server lets go of the source |
+
 ### Evidence from the original diagnosis
 
 - `evidence/regex-test.js`: the patched regex against 13 real ffmpeg 4 and ffmpeg 7 stream lines (mp4, mkv, ts; h264, hevc; aac, ac3, eac3, opus, dts; subtitles; with and without language and `(default)`). Run: `/Applications/Stremio.app/Contents/MacOS/node evidence/regex-test.js`.
@@ -549,8 +614,9 @@ The server is not open source. Three bugs are filed at `Stremio/stremio-bugs`: [
 - `launchd/`: optional re-patch watcher for after auto-updates
 - `webui/cast-remote.js`: the remote the interface gets, installed next to `server.js`
 - `webui/useCastDevice.ts` and `webui/player-cast-controls.patch`: the same thing for upstream
-- `test/fake-dlna-tv.py`: a fake TV, to verify casting without hardware
-- `test/cast-e2e.py`: casts a real film to that fake TV and checks what arrives
+- `test/fake-dlna-tv.py`: a fake TV, to verify casting without hardware; `--no-mkv` makes it refuse live Matroska the way a Samsung does
+- `test/cast-e2e.py`: casts a real film to three kinds of fake TV and checks what arrives
+- `test/renderer-probe.py`: tries a real TV with Matroska, MPEG-TS and MP4 and records which one it plays
 - `test/subtitle-pick.js`: the shipped subtitle picker against nine torrents
 - `test/position-logic.js`: the shipped position line against both kinds of renderer
 - `test/verify.sh`: runs every check below in one go
