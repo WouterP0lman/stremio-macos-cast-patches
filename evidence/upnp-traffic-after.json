@@ -1,0 +1,16 @@
+{
+ "label": "after",
+ "seconds": 60,
+ "status_requests": 100,
+ "slow_status_answers": [],
+ "upnp_actions": {
+  "Play": 1,
+  "GetTransportInfo": 1,
+  "GetVolume": 2
+ },
+ "upnp_total": 4,
+ "notify_answers": {
+  "200": 12
+ },
+ "key_lines_in_log": 0
+}

@@ -1,0 +1,16 @@
+{
+ "label": "before",
+ "seconds": 60,
+ "status_requests": 100,
+ "slow_status_answers": [],
+ "upnp_actions": {
+  "Play": 1,
+  "GetVolume": 100,
+  "GetTransportInfo": 1
+ },
+ "upnp_total": 102,
+ "notify_answers": {
+  "no answer": 7
+ },
+ "key_lines_in_log": 1
+}

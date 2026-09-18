@@ -35,7 +35,13 @@ Options:
                  same absolute position either way.
   --no-mkv       refuse a live Matroska stream with ERROR_OCCURRED and play MPEG-TS,
                  the way a Samsung Q80 does. The server should switch by itself.
-  --state-file F write what the TV was told to F as JSON, for automated tests
+  --state-file F write what the TV was told to F as JSON, for automated tests,
+                 including every UPnP action it received and when
+  --events       send a status event every five seconds once subscribed, the way
+                 a real TV does, and record whether the server answers it
+  --direct-only  announce only to the Stremio process under test, never on the
+                 multicast port, so a Stremio that is not being tested never
+                 lists this TV (set STREMIO_PID to pick the process)
   --port N       HTTP port (default 47000)
 
 Each run uses a fresh device id, because Stremio caches a device's service
@@ -47,6 +53,9 @@ PORT = 47000
 BROKEN = "--broken-xml" in sys.argv
 RELATIVE = "--relative" in sys.argv          # report time since play, not the absolute point
 NO_MKV = "--no-mkv" in sys.argv              # refuse live Matroska, like a Samsung Q80 does
+EVENTS = "--events" in sys.argv              # send status events and record the answers
+DIRECT_ONLY = "--direct-only" in sys.argv    # announce to the process under test only
+T0 = time.time()
 STATE_FILE = None
 if "--state-file" in sys.argv:
     STATE_FILE = sys.argv[sys.argv.index("--state-file") + 1]
@@ -55,7 +64,8 @@ if "--port" in sys.argv:
 import os as _os
 UDN = "uuid:" + str(uuid.uuid5(uuid.NAMESPACE_DNS, "stremio-fake-tv-" + _os.environ.get("FAKE_TV_ID", "1")))
 SSDP_ADDR, SSDP_PORT = "239.255.255.250", 1900
-state = {"uri": "", "meta": "", "transport": "STOPPED", "position": 0, "started": 0.0, "events": []}
+state = {"uri": "", "meta": "", "transport": "STOPPED", "position": 0, "started": 0.0, "events": [],
+         "calls": [], "notify": []}
 
 
 def local_ip():
@@ -171,7 +181,8 @@ def _save():
             json.dump({"uri": state.get("uri"), "transport": state.get("transport"),
                        "position": state.get("position"),
                        "relative": RELATIVE, "status": state.get("status"),
-                       "events": [[n, {k: v[0] for k, v in q.items()}] for n, q in state["events"]]},
+                       "events": [[n, {k: v[0] for k, v in q.items()}] for n, q in state["events"]],
+                       "calls": state["calls"], "notify": state["notify"]},
                       fh, indent=1)
     except Exception:
         pass
@@ -217,6 +228,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         cb = (self.headers.get("CALLBACK") or "").strip("<>")
         if cb and BROKEN:
             threading.Thread(target=self._send_broken_event, args=(cb, sid), daemon=True).start()
+        if cb and EVENTS:
+            threading.Thread(target=_event_stream, args=(cb, sid), daemon=True).start()
 
     def do_UNSUBSCRIBE(self):
         self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
@@ -248,6 +261,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n).decode("utf-8", "replace")
         action = (self.headers.get("SOAPACTION") or "").strip('"').split("#")[-1]
+        state["calls"].append([action, round(time.time() - T0, 2)])
+        _save()
         svc = "urn:schemas-upnp-org:service:AVTransport:1"
         if "RenderingControl" in self.path:
             svc = "urn:schemas-upnp-org:service:RenderingControl:1"
@@ -329,6 +344,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
 import http.client  # noqa: E402  (needed by _send_broken_event)
 
 
+def _event_stream(cb, sid):
+    """Send a well-formed LastChange event every five seconds, as a TV does while
+    it plays, and write down what the subscriber answered. UPnP wants a 200 within
+    30 seconds; a subscriber that never answers leaves each connection hanging on
+    the TV, and a TV with few sockets runs out of them."""
+    u = urllib.parse.urlparse(cb)
+    seq = 0
+    while True:
+        time.sleep(5)
+        body = ('<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>'
+                '&lt;Event xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/AVT/&quot;&gt;'
+                '&lt;InstanceID val=&quot;0&quot;&gt;&lt;TransportState val=&quot;%s&quot;/&gt;'
+                '&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>'
+                % state["transport"])
+        t = time.time()
+        try:
+            c = http.client.HTTPConnection(u.hostname, u.port, timeout=4)
+            c.request("NOTIFY", u.path or "/", body.encode(),
+                      {"Content-Type": 'text/xml; charset="utf-8"', "NT": "upnp:event",
+                       "NTS": "upnp:propchange", "SID": sid, "SEQ": str(seq)})
+            code = c.getresponse().status
+            c.close()
+        except socket.timeout:
+            code = "no answer"
+        except Exception as e:
+            code = type(e).__name__
+        state["notify"].append([code, round((time.time() - t) * 1000)])
+        _save()
+        seq += 1
+
+
 def stremio_socket():
     """Stremio's SSDP client binds a random UDP port and never listens on 1900,
     so announcements can be delivered to it directly. That also sidesteps other
@@ -339,8 +385,9 @@ def stremio_socket():
     then never reaches it."""
     import subprocess
     try:
-        pid = subprocess.run(["pgrep", "-f", "MacOS/node /Applications/Stremio.app/Contents/MacOS/server.js"],
-                             capture_output=True, text=True).stdout.split()[0]
+        pid = _os.environ.get("STREMIO_PID") or subprocess.run(
+            ["pgrep", "-f", "MacOS/node /Applications/Stremio.app/Contents/MacOS/server.js"],
+            capture_output=True, text=True).stdout.split()[0]
         out = subprocess.run(["lsof", "-nP", "-p", pid], capture_output=True, text=True).stdout
         for l in out.splitlines():
             if "UDP" not in l:
@@ -437,7 +484,8 @@ if __name__ == "__main__":
     httpd = Server(("", PORT), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     stop = threading.Event()
-    threading.Thread(target=ssdp_responder, args=(stop,), daemon=True).start()
+    if not DIRECT_ONLY:
+        threading.Thread(target=ssdp_responder, args=(stop,), daemon=True).start()
     threading.Thread(target=direct_announcer, args=(stop,), daemon=True).start()
     print(f"Fake Test TV on {BASE}/desc.xml" + ("   [malformed events on]" if BROKEN else ""))
     print("It should appear in Stremio's cast list within a few seconds. Ctrl-C to stop.")

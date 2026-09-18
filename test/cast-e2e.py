@@ -23,8 +23,8 @@ FFMPEG = os.environ.get("FFMPEG", os.path.join(APP, "ffmpeg"))
 FFPROBE = os.environ.get("FFPROBE", os.path.join(APP, "ffprobe"))
 SERVER = os.environ.get("STREMIO_URL", "http://127.0.0.1:11470")
 CACHE = os.path.join(tempfile.gettempdir(), "stremio-cast-e2e")
-FORMATS = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
-                       "stremio-server", "cast-formats.json")
+FORMATS = os.path.join(os.environ.get("STREMIO_APP_PATH") or os.path.join(
+    os.path.expanduser("~"), "Library", "Application Support", "stremio-server"), "cast-formats.json")
 SEEK_S = 205                      # past the 30s mark where the server may learn the renderer
 PASS, FAIL = [], []
 
@@ -185,6 +185,7 @@ def run(mode, media_port):
     if os.path.exists(state_file): os.remove(state_file)
     env = dict(os.environ, PYTHONUNBUFFERED="1", FAKE_TV_ID=tag)
     args = [sys.executable, os.path.join(HERE, "fake-dlna-tv.py"), "--state-file", state_file]
+    if os.environ.get("STREMIO_PID"): args.append("--direct-only")   # a sandbox: keep the real app out of it
     if relative: args.append("--relative")
     if picky: args.append("--no-mkv")
     tv = subprocess.Popen(args, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)

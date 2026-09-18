@@ -708,6 +708,68 @@ else:
         W = W.replace(old, new, 1)
     L[:] = W.split("\n"); changed.append(26); print("patch 26: applied")
 
+# 27: answer a TV's status events.
+# A renderer tells Stremio what it is doing by sending NOTIFY requests to the
+# callback Stremio gave it when subscribing. Stremio read those but never
+# answered, so every event left a connection open on the TV until the TV gave
+# up on it. UPnP asks for a 200 within 30 seconds. A TV with few sockets, like
+# the LG 42LM760S, runs out of them during a long cast and stops responding to
+# anything, including the commands that follow. Answer as soon as the body is in.
+W = "\n".join(L)
+if "e27" in W: print("patch 27: present")
+else:
+    old27 = 'var sid = req.headers.sid, seq = req.headers.seq,'
+    if W.count(old27) != 1: raise SystemExit("patch 27: anchor not unique")
+    W = W.replace(old27, 'try { res.writeHead(200, { "Content-Length": "0" }); res.end(); } catch (e27) {} ' + old27, 1)
+    L[:] = W.split("\n"); changed.append(27); print("patch 27: applied")
+
+# 28: ask a TV for its volume twice a minute at most, not with every status request.
+# Patch 22 made init() fetch the volume in the background, but init() runs for
+# every request to /casting/<id>/player, including the plain status polls. Stremio's
+# player and the cast remote poll about once a second between them, so a cast sent
+# a GetVolume to the TV every second for as long as it lasted. Volume changes made
+# from Stremio are already known without asking; one made with the TV's own remote
+# shows up within half a minute.
+W = "\n".join(L)
+if "_volBusy" in W: print("patch 28: present")
+else:
+    old28 = ('        Promise.resolve(this.player.getVolumeAsync()).then((function(vol) {\n'
+             '            self._updateStatus({ CurrentVolume: vol });\n'
+             '        })).catch(function () {});\n'
+             '        return Promise.resolve(this.mediaStatus);')
+    new28 = ('        var now28 = Date.now(); if (!this._volBusy && now28 - (this._volAt || 0) > 3e4) { this._volBusy = !0, this._volAt = now28; Promise.resolve(this.player.getVolumeAsync()).then((function(vol) {\n'
+             '            self._updateStatus({ CurrentVolume: vol });\n'
+             '        })).catch(function () {}).then(function () { self._volBusy = !1; }); }\n'
+             '        return Promise.resolve(this.mediaStatus);')
+    if W.count(old28) != 1: raise SystemExit("patch 28: anchor not found (needs patch 22 first)")
+    W = W.replace(old28, new28, 1)
+    L[:] = W.split("\n"); changed.append(28); print("patch 28: applied")
+
+# 29: keep stream addresses, and the keys inside them, out of the log.
+# A debrid stream's address carries the account key in its path, for example
+# https://torrentio.strem.fun/resolve/realdebrid/<key>/... Stremio logged that
+# address in full on every cast: the request line, the file probe and the ffmpeg
+# command line. Anyone reading a log someone attached to a bug report could use
+# the account. Every line the server prints now passes through one filter that
+# keeps the host and drops the rest of any address that is not on this machine.
+# Addresses on 127.0.0.1 and localhost stay whole: they are Stremio's own and
+# are what makes a log useful. Kept on the first line, so line numbers do not move.
+if "__redactURL" in L[0]: print("patch 29: present")
+else:
+    if not L[0].startswith("/*!"): raise SystemExit("patch 29: first line is not the licence comment")
+    L[0] = L[0] + (
+        ' (function () { if (global.__redactURL) return; var util29 = require("util"), '
+        'local29 = /^(?:127(?:\\.\\d{1,3}){3}|localhost|\\[::1\\])(?::\\d+)?$/i; '
+        'var red29 = function (s) { return String(s)'
+        '.replace(/(https?:\\/\\/)([^\\/\\s"\'<>?#&]+)([^\\s"\'<>]*)/gi, function (m, p, h, rest) { '
+        'h = h.replace(/^.*@/, ""); return local29.test(h) ? m : p + h + (rest && rest !== "/" ? "/\\u2026" : rest); })'
+        '.replace(/(https?%(?:25)?3A%(?:25)?2F%(?:25)?2F)([^%\\s"\'<>&\\/]+)([^\\s"\'<>&]*)/gi, function (m, p, h, rest) { '
+        'return local29.test(h) ? m : p + h + (rest ? "\\u2026" : ""); }); }; '
+        '["log", "info", "warn", "error"].forEach(function (k) { var f = console[k]; if (typeof f !== "function") return; '
+        'console[k] = function () { return f.call(console, red29(util29.format.apply(util29, arguments))); }; }); '
+        'global.__redactURL = red29; })();')
+    changed.append(29); print("patch 29: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)
@@ -752,7 +814,14 @@ fi
 if [ -n "$APP" ] && command -v codesign >/dev/null; then
   # editing a file inside the bundle breaks the code signature seal, so re-sign
   # ad hoc; entitlements and the hardened-runtime flag are preserved
+  # Every file in Contents/MacOS carries a signature of its own, and the bundle's
+  # seal refuses to form over one that changed or lost it. server.js was just
+  # rewritten and cast-remote.js freshly copied, so sign those two first.
+  for f in "$S" "$(dirname "$S")/cast-remote.js"; do
+    [ -f "$f" ] && codesign --force --sign - "$f"
+  done
   codesign --force --sign - --preserve-metadata=entitlements,flags,identifier "$APP"
+  codesign --verify --deep --strict "$APP" && echo "signature OK"
   xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
   open -a "$APP"
 else
