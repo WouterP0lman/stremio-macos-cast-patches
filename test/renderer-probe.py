@@ -30,7 +30,12 @@ VARIANTS = [
     ("mkv-live",    "matroska", "video/x-mkv", LIVE_FEATURES,    "same, but honest that it cannot seek"),
     ("ts-live",     "mpegts",   "video/mpeg",  LIVE_FEATURES,    "MPEG-TS, the broadcast format every TV plays"),
     ("mp4-live",    "mp4",      "video/mp4",   LIVE_FEATURES,    "fragmented MP4"),
+    ("ts-sidecar",  "mpegts",   "video/mpeg",  LIVE_FEATURES,    "MPEG-TS with the subtitle as a separate file"),
 ]
+
+SRT = "".join("%d\n00:%02d:%02d,000 --> 00:%02d:%02d,500\nlosse ondertitel %02d:%02d\n\n"
+              % (n + 1, t // 60, t % 60, (t + 4) // 60, (t + 4) % 60, t // 60, t % 60)
+              for n, t in enumerate(range(0, 300, 5)))
 
 requests_seen = []
 lock = threading.Lock()
@@ -75,6 +80,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _headers(self, v):
         self.send_response(200)
+        if v[0] == "ts-sidecar":
+            # Samsung's own way of pairing a subtitle file with a video
+            self.send_header("CaptionInfo.sec", "http://%s/subs.srt" % self.headers.get("Host", ""))
         self.send_header("Content-Type", v[2])
         self.send_header("Accept-Ranges", "none")
         self.send_header("Connection", "close")
@@ -87,7 +95,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._headers(v); self.end_headers()
 
     def do_GET(self):
-        self._record(); v = self._variant()
+        self._record()
+        if urllib.parse.urlparse(self.path).path == "/subs.srt":
+            body = SRT.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/srt; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body); return
+        v = self._variant()
         if not v: self.send_error(404); return
         self._headers(v)
         self.send_header("Transfer-Encoding", "chunked")
@@ -145,8 +160,13 @@ def soap(ctl, action, inner=""):
         return 0, str(e)
 
 
-def didl(url, mime):
-    # the same shape Stremio's buildMetadata produces
+def didl(url, mime, subs=None):
+    # the same shape Stremio's buildMetadata produces, subtitle elements included
+    extra = ""
+    if subs:
+        extra = ('<sec:CaptionInfo sec:type="srt">%s</sec:CaptionInfo>'
+                 '<sec:CaptionInfoEx sec:type="srt">%s</sec:CaptionInfoEx>'
+                 '<res protocolInfo="http-get:*:text/srt:*">%s</res>') % ((html.escape(subs),) * 3)
     return ('<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
             'xmlns:dc="http://purl.org/dc/elements/1.1/" '
             'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:sec="http://www.sec.co.kr/">'
@@ -154,7 +174,7 @@ def didl(url, mime):
             '<upnp:class>object.item.videoItem.movie</upnp:class>'
             '<dc:title>Stremio test</dc:title><dc:creator>Stremio</dc:creator>'
             f'<res protocolInfo="http-get:*:{mime}:*">{html.escape(url)}</res>'
-            '</item></DIDL-Lite>')
+            + extra + '</item></DIDL-Lite>')
 
 
 def tag(xml, name):
@@ -183,7 +203,8 @@ def main():
         mark = len(requests_seen)
         code, out = soap(ctl, "SetAVTransportURI",
                          "<CurrentURI>%s</CurrentURI><CurrentURIMetaData>%s</CurrentURIMetaData>"
-                         % (html.escape(url), html.escape(didl(url, v[2]))))
+                         % (html.escape(url), html.escape(didl(url, v[2],
+                            "http://%s:%d/subs.srt" % (ip, port) if v[0] == "ts-sidecar" else None))))
         err = tag(out, "errorDescription") or tag(out, "errorCode")
         if code != 200:
             results.append((v, "rejected: %s" % (err or code), [])); print("  %-12s rejected: %s" % (v[0], err or code)); continue
