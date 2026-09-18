@@ -224,6 +224,10 @@ puts a remote on screen:
 - stop casting, as its own button: it ends the cast on the server as well, so the remote does not come back
 - close the remote with the cross while the TV keeps playing; it stays closed for that cast, also after a
   reload, and shows up again for the next one
+- bring it back from the player's own menu (the three dots), which gains "Show cast remote" while
+  something is being cast. The option is found by the class stremio-web's build gives the menu, so it
+  works in every interface language, and it marks its own presses as inside the menu so the player
+  neither closes the menu early nor lets the click fall through and pause the video
 
 Presses are gathered up rather than sent one by one. Three quick jumps become one command
 of ninety seconds instead of three transcode restarts, and the panel shows where you are
@@ -497,6 +501,7 @@ All edits are anchored on unique strings, not line numbers, and verified with `n
 | 23 | `Casting.prototype.transcode`, line 83035 | with `?ts=1`, produce MPEG-TS instead of Matroska, with a content-features header that admits the stream cannot be seeked |
 | 24 | `DLNAClient.playFromStatus` | start in Matroska, look once at what the TV reports, switch to MPEG-TS when it refuses, and remember per device what played |
 | 25 | `DLNAClient` status, subtitles, audio track, pause, seek | keep a clock of where the film is, so a subtitle change resumes where you were and a seek is honoured while paused |
+| 26 | `Discovery.prototype.collect`, the `/casting` list | remember when each network device last answered a search, and leave out of the cast menu any that has been silent for ninety seconds |
 
 Editing a file inside the bundle breaks the code signature seal. The script re-signs the app ad hoc with `--preserve-metadata=entitlements,flags,identifier`, so the hardened runtime flag and entitlements stay. The Developer ID signature and notarization ticket no longer apply to the modified bundle. The app launches normally on macOS 26.5.1 after this. Backups of the original `server.js` and `_CodeSignature` are written to `backups/<timestamp>/` before every change.
 
@@ -569,10 +574,13 @@ The picture is copied through untouched and only the audio is re-encoded, the TV
 resumes at 229s rather than the 409s the old position logic produced. The TV's own
 `GetPositionInfo` then answers `00:04:17` against a `00:05:00` film, which matches.
 
-Two things about this TV that are worth knowing and are not patched: it answers
-`GetTransportInfo` and `GetMediaInfo` with nothing at all, and Stremio never drops a cast
-device that has gone away, so a device list can fill up with renderers that no longer
-exist.
+Two things about this TV that are worth knowing: it answers `GetTransportInfo` and
+`GetMediaInfo` with nothing at all, and Stremio never dropped a cast device that had gone
+away, so a device list filled up with renderers that no longer existed. Patch 26 fixes the
+second: Stremio already searches every ten seconds, it now also remembers when each device
+last answered, and the cast menu leaves out any that has been silent for ninety seconds
+unless something is playing on it. Measured: a renderer killed without saying goodbye was
+gone from the menu within the time, while the Samsung stayed listed throughout.
 
 Confirmed on a Samsung Q80 (QE55Q80R) on 18 September 2026, through Stremio's own pipeline:
 

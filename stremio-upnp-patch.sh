@@ -681,6 +681,33 @@ else:
         W = W.replace(old, new, 1)
     L[:] = W.split("\n"); changed.append(25); print("patch 25: applied")
 
+# 26: forget cast devices that have gone away.
+# Stremio searches for renderers every ten seconds but only ever adds to its list:
+# a TV that is switched off, or a test renderer that has stopped, stays in the cast
+# menu for as long as Stremio runs, and casting to it does nothing. Remember when
+# each device last answered a search, and leave out of the list any network device
+# that has not answered for ninety seconds, unless something is being cast to it.
+# Nine missed searches in a row is not a flaky network; it is a device that is off.
+# It comes back by itself within ten seconds of answering again.
+W = "\n".join(L)
+if "seen26" in W: print("patch 26: present")
+else:
+    reps26 = [
+        ('Discovery.prototype.collect = function(device) {\n',
+         'Discovery.prototype.collect = function(device) {\n'
+         '        (this.seen26 || (this.seen26 = {}))[device.id] = Date.now();\n'),
+        ('res.end(JSON.stringify(Object.keys(discovery.devices).map((function(key) {',
+         'res.end(JSON.stringify(Object.keys(discovery.devices).filter(function (key26) { '
+         'var d26 = discovery.devices[key26], at26 = discovery.seen26 && discovery.seen26[key26], p26 = self.players[key26]; '
+         'if (!d26 || d26.facility !== "SSDP" || !at26) return true; '
+         'if (p26 && p26.mediaStatus && p26.mediaStatus.source) return true; '
+         'return Date.now() - at26 < 9e4; }).map((function(key) {'),
+    ]
+    for old, new in reps26:
+        if W.count(old) != 1: raise SystemExit("patch 26: anchor not unique: " + old[:70].replace("\n", "\\n"))
+        W = W.replace(old, new, 1)
+    L[:] = W.split("\n"); changed.append(26); print("patch 26: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)

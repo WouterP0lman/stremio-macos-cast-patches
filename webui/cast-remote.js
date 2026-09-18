@@ -84,9 +84,9 @@
 
     /* ---------- watching ---------- */
 
-    /* Stremio never drops a device that has gone away, so a list can hold renderers
-     * that stopped existing. Asking those costs a failed request every round, which
-     * is why a device that does not answer is left alone for a while. */
+    /* A renderer that has gone away stays in Stremio's list for another ninety
+     * seconds (patch 26), and asking it costs a failed request every round, which is
+     * why a device that does not answer is left alone for a while. */
     var quiet = {};
 
     function findDevice() {
@@ -122,9 +122,12 @@
         });
     }
 
-    function pollDevice() {
-        findDevice().then(function (res) {
+    var lastAny = false;
+
+    function refreshDevice() {
+        return findDevice().then(function (res) {
             var hit = res.hit;
+            if (res.any !== null) lastAny = !!res.any;
             if (res.any === false) {
                 if (++gone >= 2 && dismissed()) setDismissed('');
             } else if (res.any) {
@@ -144,8 +147,78 @@
                 subtitleOptions = null;
                 render();
             }
-        }).then(function () { setTimeout(pollDevice, DEVICE_POLL); });
+        });
     }
+
+    function pollDevice() {
+        refreshDevice().then(function () { setTimeout(pollDevice, DEVICE_POLL); });
+    }
+
+    /* ---------- bringing it back from the player's menu ---------- */
+
+    /* Closing the remote must not mean losing it. While something is being cast,
+     * the player's own "more" menu gets an option that brings it back. The menu is
+     * found by the class stremio-web's build gives it, which keeps its name and only
+     * gains a hash, so this works in every interface language. */
+    var REMOTE_ICON = '<path fill="currentColor" d="M15 9H9c-.55 0-1 .45-1 1v12c0 .55.45 1 1 1h6c.55 0 '
+        + '1-.45 1-1V10c0-.55-.45-1-1-1zm-3 6c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM7.05 6.05l1.41 '
+        + '1.41C9.37 6.56 10.62 6 12 6s2.63.56 3.54 1.46l1.41-1.41C15.68 4.78 13.93 4 12 4s-3.68.78-4.95 '
+        + '2.05zM12 0C8.96 0 6.21 1.23 4.22 3.22l1.41 1.41C7.26 3.01 9.51 2 12 2s4.74 1.01 6.36 '
+        + '2.64l1.41-1.41C17.79 1.23 15.04 0 12 0z"/>';
+
+    function showRemote() {
+        setDismissed('');
+        collapsed = false;
+        refreshDevice();
+    }
+
+    function closeMenu(menu) {
+        // the player closes its menus on any mousedown that does not start inside one
+        var outside = menu.parentElement;
+        if (outside) outside.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+    }
+
+    function addMenuOption() {
+        var menus = document.querySelectorAll('[class*="options-menu-container-"]');
+        for (var i = 0; i < menus.length; i++) {
+            var menu = menus[i];
+            var mine = menu.querySelector('[data-cast-remote]');
+            if (!lastAny) { if (mine) mine.remove(); continue; }
+            if (mine) continue;
+            var sample = menu.querySelector('[class*="option-container-"]');
+            if (!sample) continue;
+            var opt = sample.cloneNode(true);
+            opt.setAttribute('data-cast-remote', '1');
+            opt.classList.remove('disabled');
+            opt.removeAttribute('disabled');
+            opt.removeAttribute('title');
+            var label = opt.querySelector('[class*="label-"]');
+            if (label) label.textContent = 'Show cast remote';
+            var icon = opt.querySelector('svg');
+            if (icon) { icon.setAttribute('viewBox', '0 0 24 24'); icon.innerHTML = REMOTE_ICON; }
+            (function (m) {
+                // The player closes its menus on any mousedown it does not know came
+                // from inside one; say so on the event itself, whatever React makes of
+                // a node it did not render.
+                var inside = function (e) { e.optionsMenuClosePrevented = true; };
+                opt.addEventListener('pointerdown', inside);
+                opt.addEventListener('mousedown', inside);
+                opt.addEventListener('click', function (e) {
+                    e.preventDefault(); e.stopPropagation();
+                    showRemote();
+                    closeMenu(m);
+                });
+            })(menu);
+            menu.insertBefore(opt, menu.firstChild);
+        }
+    }
+
+    var menuQueued = false;
+    new MutationObserver(function () {
+        if (menuQueued) return;
+        menuQueued = true;
+        requestAnimationFrame(function () { menuQueued = false; addMenuOption(); });
+    }).observe(document.documentElement, { childList: true, subtree: true });
 
     function pollState() {
         if (!device) return setTimeout(pollState, STATE_POLL);

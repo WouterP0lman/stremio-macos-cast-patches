@@ -108,8 +108,8 @@ def post(path, timeout=30):
 
 def device_id(tag):
     """The fake TV derives its UDN from this tag, so the id is known up front.
-    Matching on it matters: Stremio keeps devices in its list after they are gone,
-    so a run that matched on the name would cast at a TV that stopped existing."""
+    Matching on it matters: a device that is gone stays in Stremio's list for a
+    while, so a run that matched on the name could cast at a TV that stopped existing."""
     import uuid
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, "stremio-fake-tv-" + tag))
 
