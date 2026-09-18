@@ -770,6 +770,34 @@ else:
         'global.__redactURL = red29; })();')
     changed.append(29); print("patch 29: applied")
 
+# 30: re-encode on the Mac's own video chips, and never at 4K.
+# When the picture has to be re-encoded (a subtitle to burn in, or a codec the
+# TV cannot take), Stremio used x264 "ultrafast" in software, at the source's
+# own size. For a 4K HEVC 10-bit film that runs at 0.4x real time, even on an
+# M4 Pro: the TV gets less than it plays, stalls, retries every second and
+# gives up with ERROR_OCCURRED. On macOS, decode with VideoToolbox, bring 4K
+# down to 1080p, turn HDR into SDR with tonemapping (otherwise the picture looks
+# washed out on a stream marked SDR), burn in the subtitle, and encode H.264 in
+# hardware: measured 6x real time on the same film. Elsewhere nothing changes.
+W = "\n".join(L)
+if "vf30" in W: print("patch 30: present")
+else:
+    old30 = ('copyVideo ? args.push("-c:v", "copy") : (args.push("-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p"), \n'
+             '                subtitles && args.push("-vf", "subtitles=" + subtitles))')
+    new30 = ('copyVideo ? args.push("-c:v", "copy") : ((function (vs30) { var m30 = String(vs30.vidfmt || "").match(/(\\d{3,5})x(\\d{3,5})/), w30 = m30 ? parseInt(m30[1], 10) : 0, '
+             'hdr30 = /smpte2084|arib-std-b67/.test(String(vs30.pixfmt || "")), vf30 = []; '
+             'if (process.platform !== "darwin") { args.push("-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p"); subtitles && args.push("-vf", "subtitles=" + subtitles); return; } '
+             'var i30 = args.indexOf("-i"); i30 >= 0 && args.splice(i30, 0, "-hwaccel", "videotoolbox"); '
+             'w30 > 1920 && vf30.push("scale=w=1920:h=-2"); '
+             'vf30.push(hdr30 ? "tonemapx=tonemap=bt2390:transfer=bt709:matrix=bt709:primaries=bt709:format=yuv420p" : "format=yuv420p"); '
+             'subtitles && vf30.push("subtitles=" + subtitles); '
+             'args.push("-c:v", "h264_videotoolbox", "-b:v", "12M", "-maxrate", "16M", "-bufsize", "24M", "-profile:v", "high", "-vf", vf30.join(",")); '
+             '})(videoStream), \n'
+             '                0)')
+    if W.count(old30) != 1: raise SystemExit("patch 30: anchor not unique")
+    W = W.replace(old30, new30, 1)
+    L[:] = W.split("\n"); changed.append(30); print("patch 30: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)
@@ -778,13 +806,14 @@ PY
 }
 
 # Pass 1: detect. A run with nothing to do must not restart Stremio.
-check_syntax() { [ -n "$NODE" ] && "$NODE" --check "$S" || { echo "(no node found, syntax not checked)"; return 0; }; }
+# A failed check must fail: it used to fall through to "no node found" and carry on.
+check_syntax() { if [ -z "$NODE" ]; then echo "(no node found, syntax not checked)"; return 0; fi; "$NODE" --check "$S"; }
 OUT=$(run_patch "$S" dry); echo "$OUT"
-if ! echo "$OUT" | grep -q "applied"; then check_syntax && echo "syntax OK"; exit 0; fi
-[ -n "$DRY" ] && { check_syntax && echo "syntax OK (dry run, nothing written)"; exit 0; }
+if ! echo "$OUT" | grep -q "applied"; then check_syntax && echo "syntax OK" && exit 0; echo "SYNTAX ERROR"; exit 1; fi
+[ -n "$DRY" ] && { check_syntax && echo "syntax OK (dry run, nothing written)" && exit 0; echo "SYNTAX ERROR"; exit 1; }
 if [ -z "$LIVE" ]; then   # copy mode: write to the copy, do not touch the app
   run_patch "$S" "" | grep -v "^patch" || true
-  check_syntax && echo "syntax OK (copy mode, app untouched)"; exit 0
+  check_syntax && echo "syntax OK (copy mode, app untouched)" && exit 0; echo "SYNTAX ERROR in the copy"; exit 1
 fi
 
 # Pass 2: live apply.
@@ -799,7 +828,13 @@ fi
 mkdir -p "$BK"; cp -p "$S" "$BK/server.js.orig"
 [ -n "$APP" ] && [ -d "$APP/Contents/_CodeSignature" ] && cp -Rp "$APP/Contents/_CodeSignature" "$BK/"
 run_patch "$S" "" | grep -v "^patch" || true
-check_syntax && echo "syntax OK"
+if ! check_syntax; then
+  cp -p "$BK/server.js.orig" "$S"
+  echo "SYNTAX ERROR: the original server.js is back in place, nothing changed"
+  [ -n "$APP" ] && open -a "$APP"
+  exit 1
+fi
+echo "syntax OK"
 # the remote lives next to server.js so the server can hand it to the interface
 if [ -f "$DIR/webui/cast-remote.js" ]; then
   cp "$DIR/webui/cast-remote.js" "$(dirname "$S")/cast-remote.js"
