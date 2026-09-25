@@ -383,6 +383,55 @@ else:
     i = one(lambda l: OLD20 in l, "patch 20"); L[i] = L[i].replace(OLD20, NEW20, 1)
     changed.append(20); print("patch 20: applied (line %d)" % (i+1))
 
+MW31 = ('enginefs.__proxyRouter = proxy.getRouter(), '
+        'enginefs.router.use("/proxy", function (req, res, next) { '
+        'if (!/text\\/html/i.test(String(req.headers.accept || ""))) return next(); '
+        'delete req.headers["accept-encoding"]; '
+        'delete req.headers["if-none-match"]; delete req.headers["if-modified-since"]; '
+        'var w = res.write, e = res.end, wh = res.writeHead, chunks = [], code31 = 0, tries = 0, done31 = false; '
+        'var timer31 = setTimeout(function () { waiting31(); }, 15e3); '
+        'function finish31() { if (done31) return true; done31 = true; clearTimeout(timer31); '
+        'res.write = w; res.end = e; res.writeHead = wh; return false; } '
+        'function waiting31() { if (finish31()) return; '
+        'var buf = Buffer.from("<!doctype html><html><head><meta charset=\\"utf-8\\"><title>Stremio</title></head>'
+        '<body style=\\"margin:0;height:100vh;display:flex;align-items:center;justify-content:center;'
+        'background:#0b0b1a;color:#fff;font:15px -apple-system,Segoe UI,sans-serif;text-align:center\\">'
+        '<div><p>Stremio could not reach its interface.</p>'
+        '<p style=\\"opacity:.6\\">Trying again in <span id=\\"s\\">3</span>s</p></div>'
+        '<script>var n=3;setInterval(function(){n--;document.getElementById(\\"s\\").textContent=n;'
+        'if(n<1)location.reload()},1000)<\\/script></body></html>", "utf8"); '
+        'try { res.removeHeader("etag"); res.removeHeader("last-modified"); } catch (x) {} '
+        'wh.call(res, 200, { "Content-Type": "text/html; charset=utf-8", "Content-Length": buf.length, '
+        '"Cache-Control": "no-store" }); e.call(res, buf); } '
+        'function forward31() { if (finish31()) return; '
+        'var body = Buffer.concat(chunks), ct = String(res.getHeader("content-type") || ""); '
+        'if (/text\\/html/i.test(ct)) { var html = body.toString("utf8"); '
+        'if (html.indexOf("</body>") >= 0 && html.indexOf("cast-remote.js") < 0) '
+        'html = html.replace("</body>", "<script src=\\"/cast-remote.js\\"><\\/script></body>"); '
+        'body = Buffer.from(html, "utf8"); '
+        'try { res.removeHeader("last-modified"); res.removeHeader("etag"); '
+        'res.setHeader("cache-control", "no-store"); } catch (x) {} } '
+        'try { res.setHeader("content-length", body.length); res.removeHeader("transfer-encoding"); } catch (x) {} '
+        'wh.call(res, code31 || res.statusCode || 200); e.call(res, body); } '
+        'res.writeHead = function (c, a, b) { '
+        'var hs = (a && typeof a === "object") ? a : (b && typeof b === "object" ? b : null); '
+        'if (hs) Object.keys(hs).forEach(function (k) { '
+        'if (!/^(content-length|transfer-encoding|etag|last-modified)$/i.test(k)) { '
+        'try { res.setHeader(k, hs[k]); } catch (x) {} } }); '
+        'code31 = c; return res; }; '
+        'res.write = function (c, enc, cb) { '
+        'if (c) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c, typeof enc === "string" ? enc : "utf8")); '
+        'if (typeof enc === "function") enc(); else if (typeof cb === "function") cb(); return true; }; '
+        'res.end = function (c, enc, cb) { '
+        'if (c && typeof c !== "function") chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c, typeof enc === "string" ? enc : "utf8")); '
+        'var st = code31 || res.statusCode || 200; '
+        'if (st >= 500) { if (tries++ < 1) { chunks = []; code31 = 0; '
+        'return void setTimeout(function () { enginefs.__proxyRouter(req, res, waiting31); }, 500); } '
+        'return void waiting31(); } '
+        'return void forward31(); }; '
+        'next(); }), '
+        'enginefs.router.use("/proxy", enginefs.__proxyRouter);')
+
 # 18: put the cast remote in the interface itself.
 # The shell does not load web.stremio.com directly, it loads it through this
 # server's own proxy, so the page can be handed one extra script on the way past.
@@ -426,6 +475,7 @@ NEW18 = ('enginefs.router.get("/cast-remote.js", function (req, res) { '
          'res.write = w; res.end = e; return e.call(res, html, "utf8"); }; '
          'next(); }), '
          'enginefs.router.use("/proxy", proxy.getRouter());')
+NEW18 = NEW18[:NEW18.index('enginefs.router.use("/proxy", function (req, res, next)')] + MW31
 if any("cast-remote.js" in l for l in L): print("patch 18: present")
 else:
     i = one(lambda l: OLD18 in l, "patch 18"); L[i] = L[i].replace(OLD18, NEW18, 1)
@@ -797,6 +847,29 @@ else:
     if W.count(old30) != 1: raise SystemExit("patch 30: anchor not unique")
     W = W.replace(old30, new30, 1)
     L[:] = W.split("\n"); changed.append(30); print("patch 30: applied")
+
+# 31: a hiccup on the network must not stop the app from starting.
+# The shell does not load the interface itself, it asks this server for it through
+# /proxy. If that fetch fails, the route answered 500 and the shell gave up with
+# "Stremio cannot start. The web interface failed to load." Reproduced: an upstream
+# that cannot be reached returns 500 after five seconds, and one that never answers
+# leaves the request hanging. The page request is now held back until the answer is
+# known: a server error is tried again twice, a request that stalls for fifteen
+# seconds is cut short, and only if that all fails does the shell get a page of its
+# own that counts down and reloads itself, so the app comes up as soon as the
+# network does. Replaces the interception patch 18 installed.
+W = "\n".join(L)
+if "code31" in W: print("patch 31: present")
+else:
+    start31 = 'enginefs.router.use("/proxy", function (req, res, next) { var wantsPage'
+    end31 = 'enginefs.router.use("/proxy", proxy.getRouter());'
+    if W.count(start31) == 1 and W.count(end31) == 1:
+        a = W.index(start31); b = W.index(end31) + len(end31)
+        if b < a: raise SystemExit("patch 31: the proxy mount sits before the interception")
+        W = W[:a] + MW31 + W[b:]
+        L[:] = W.split("\n"); changed.append(31); print("patch 31: applied")
+    else:
+        print("patch 31: nothing to upgrade (patch 18 installs it already)")
 
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
