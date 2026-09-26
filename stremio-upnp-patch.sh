@@ -871,6 +871,35 @@ else:
     else:
         print("patch 31: nothing to upgrade (patch 18 installs it already)")
 
+# 32: a stream without trackers must still find peers.
+# An add-on may hand over nothing but an info hash, and then the engine searches
+# with "dht:<hash>" alone. On a network where the usual DHT bootstrap nodes are
+# unreachable that finds nothing: two magnets from one add-on sat for two hours at
+# 0 of 0 peers, no metadata, while the same hash with four public trackers had
+# metadata and eight peers within six seconds. So a small list of trackers is
+# added to what the request brings, and DHT stays in the list next to it.
+W = "\n".join(L)
+if "DEFAULT_TRACKERS" in W: print("patch 32: present")
+else:
+    reps32 = [
+        ('EngineFS.STREAM_TIMEOUT = 3e4, EngineFS.ENGINE_TIMEOUT = 6e4;',
+         'EngineFS.STREAM_TIMEOUT = 3e4, EngineFS.ENGINE_TIMEOUT = 6e4, '
+         'EngineFS.DEFAULT_TRACKERS = [ "tracker:udp://tracker.opentrackr.org:1337/announce", '
+         '"tracker:udp://open.stealth.si:80/announce", "tracker:udp://exodus.desync.com:6969/announce", '
+         '"tracker:udp://tracker.qu.ax:6969/announce" ];'),
+        ('                sources: [ "dht:" + ih ]\n',
+         '                sources: [ "dht:" + ih ].concat(EngineFS.DEFAULT_TRACKERS || [])\n'),
+        ('                        sources: trackers\n',
+         '                        sources: (function () { var s32 = (trackers || []).slice(); '
+         'if (s32.indexOf("dht:" + infoHash) < 0) s32.push("dht:" + infoHash); '
+         '(EngineFS.DEFAULT_TRACKERS || []).forEach(function (t32) { if (s32.indexOf(t32) < 0) s32.push(t32); }); '
+         'return s32; })()\n'),
+    ]
+    for old, new in reps32:
+        if W.count(old) != 1: raise SystemExit("patch 32: anchor not unique: " + old[:60].replace("\n", "\\n"))
+        W = W.replace(old, new, 1)
+    L[:] = W.split("\n"); changed.append(32); print("patch 32: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)
