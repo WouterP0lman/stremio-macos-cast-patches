@@ -74,6 +74,20 @@ p, dry = sys.argv[1], sys.argv[2]
 L = open(p, encoding="utf-8").read().split("\n")
 changed = []
 
+# Webpack numbers its modules per build: 5.1.28 moved os, child_process, the
+# settings and enginefs. The patch texts below are written with the 5.1.27
+# numbers; ids() puts in the ones this build uses, found by how the bundle
+# itself imports them.
+import re as _re0, collections as _col0
+def _modid(var):
+    c = _col0.Counter(_re0.findall(r'\b' + var + r' = __webpack_require__\((\d+)\)', "\n".join(L)))
+    return c.most_common(1)[0][0] if c else None
+_IDS = {"22": _modid("os"), "32": _modid("child"), "106": _modid("userSettings"), "172": _modid("enginefs")}
+def ids(text):
+    for old, new in _IDS.items():
+        if new: text = text.replace("__webpack_require__(%s)" % old, "__webpack_require__(%s)" % new)
+    return text
+
 def one(pred, what):
     h = [i for i, l in enumerate(L) if pred(l)]
     assert len(h) == 1, "%s: pattern not found exactly once: %r" % (what, h)
@@ -161,11 +175,12 @@ else:
 # 8: subtitle sync, makeSubs must not pre-shift the srt (frames keep original PTS because of -copyts)
 OLD8 = 'this.makeSubs(req.query.subtitles, Math.max(0, offset - subtitlesDelay))'
 MID8 = 'this.makeSubs(req.query.subtitles, 0)'          # first form of this patch
+V28_8 = 'this.makeSubs(req.query.subtitles, offset - subtitlesDelay)'   # 5.1.28 dropped the Math.max, still shifts by the seek point
 NEW8 = 'this.makeSubs(req.query.subtitles, subtitlesDelay)'
-if any(NEW8 in l for l in L): print("patch 8: present")
+if any(NEW8 in l or "req.query.subtitles, subtitlesDelay)" in l for l in L): print("patch 8: present")   # 43 rewrites it later
 else:
-    i = one(lambda l: OLD8 in l or MID8 in l, "patch 8")
-    L[i] = L[i].replace(MID8 if MID8 in L[i] else OLD8, NEW8, 1)
+    i = one(lambda l: OLD8 in l or MID8 in l or V28_8 in l, "patch 8")
+    L[i] = L[i].replace(next(x for x in (MID8, OLD8, V28_8) if x in L[i]), NEW8, 1)
     changed.append(8); print("patch 8: applied (line %d)" % (i+1))
 
 # 9: repair malformed UPnP event XML (unescaped & and control chars) instead of discarding the event
@@ -187,7 +202,15 @@ SHIFT = ('var shiftSrt = function (t, ms) { return ms ? t.replace(/(\\d{2}):(\\d
          'var p = function (n, w) { return ("000" + n).slice(-w); }; '
          'return p(Math.floor(v / 3600000), 2) + ":" + p(Math.floor(v % 3600000 / 60000), 2) + ":" '
          '+ p(Math.floor(v % 60000 / 1000), 2) + "," + p(v % 1000, 3); }) : t; }; ')
-if any("var shiftSrt = function" in l for l in L): print("patch 10: present")
+# 5.1.28 shifts the srt in JS itself (parseSrt) and subtracts. It also sends the
+# delay in seconds instead of ms. After patch 8 the argument is that delay, later
+# when positive, so on that build only the sign changes.
+OLD10_28 = 'var offsetMs = Math.round(1e3 * offset), tracks = parseSrt(text)'
+NEW10_28 = 'var offsetMs = -Math.round(1e3 * offset), tracks = parseSrt(text)'
+if any("var shiftSrt = function" in l or NEW10_28 in l for l in L): print("patch 10: present")
+elif any(OLD10_28 in l for l in L):
+    i = one(lambda l: OLD10_28 in l, "patch 10 (5.1.28)"); L[i] = L[i].replace(OLD10_28, NEW10_28, 1)
+    changed.append(10); print("patch 10: applied on the 5.1.28 shifter (line %d)" % (i + 1))
 else:
     i = one(lambda l: "Casting.prototype.makeSubs = function(subsUrl, offset)" in l, "patch 10")
     j = next(k for k in range(i, i + 6) if L[k].strip() == "var self = this;")
@@ -248,26 +271,32 @@ else:
 # 13: the requested start position survives the probe that runs before the device is loaded
 OLD13A = 'var self = this;\n        return castingUtils.getVideoInfo(this.executables.ffmpeg, srcURL).then((function(info) {'
 NEW13A = 'var self = this, wantedAt = this.mediaStatus.time;\n        return castingUtils.getVideoInfo(this.executables.ffmpeg, srcURL).then((function(info) {'
-OLD13B = 'self.mediaStatus.length = 1e3 * info.duration, self.delayedPlayFromStatus();'
-NEW13B = 'self.mediaStatus.length = 1e3 * info.duration, self.mediaStatus.time = wantedAt, self.delayedPlayFromStatus();'
+OLD13B = 'self.mediaStatus.length = 1e3 * info.duration, self.delayedPlayFromStatus()'
+NEW13B = 'self.mediaStatus.length = 1e3 * info.duration, self.mediaStatus.time = wantedAt, self.delayedPlayFromStatus()'
 OLD13C = 'this.seekTime = 0, this.mediaStatus.source = srcURL, this.mediaStatus.time = parseInt(startAt, 10) || 0,'
 NEW13C = 'this.seekTime = (parseInt(startAt, 10) || 0) / 1e3, this.mediaStatus.source = srcURL, this.mediaStatus.time = parseInt(startAt, 10) || 0,'
 if any("wantedAt" in l for l in L): print("patch 13: present")
 else:
-    i = one(lambda l: 'var self = this;' == l.strip() and "DLNAClient" not in l, "patch 13 (marker)") if False else None
-    # DLNA: bewaar de gevraagde tijd voordat de ffmpeg-probe draait
-    d = one(lambda l: "DLNAClient.prototype.play = function(srcURL, startAt)" in l, "patch 13 (dlna play)")
-    j = next(k for k in range(d, d + 6) if L[k].strip() == "var self = this;")
-    L[j] = L[j].replace("var self = this;", "var self = this, wantedAt = this.mediaStatus.time;", 1)
+    # DLNA: bewaar de gevraagde tijd voordat de ffmpeg-probe draait; een positie-
+    # melding van de tv tijdens de probe overschrijft hem anders (ook in 5.1.28)
+    d = one(lambda l: "DLNAClient.prototype.play = function(srcURL, startAt)" in l
+            or "DLNAClient.prototype.play = function(srcURL, time)" in l, "patch 13 (dlna play)")
+    j = next(k for k in range(d, d + 6) if L[k].strip().startswith("var self = this"))
+    L[j] = L[j].replace("var self = this", "var self = this, wantedAt = this.mediaStatus.time", 1)
     k = next(x for x in range(j, j + 10) if OLD13B in L[x])
     L[k] = L[k].replace(OLD13B, NEW13B, 1)
-    # Chromecast: seekTime (in seconden) bepaalt daar de startpositie, niet mediaStatus.time
-    c = one(lambda l: OLD13C in l, "patch 13 (chromecast play)")
-    L[c] = L[c].replace(OLD13C, NEW13C, 1)
+    # Chromecast: seekTime (in seconden) bepaalt daar de startpositie, niet
+    # mediaStatus.time. 5.1.28 zet seekTime zelf uit de gevraagde tijd.
+    if any("this.seekTime = Math.max(0, parseInt(time, 10) || 0) / 1e3" in l for l in L):
+        c = -1; print("patch 13: chromecast part already upstream")
+    else:
+        c = one(lambda l: OLD13C in l, "patch 13 (chromecast play)")
+        L[c] = L[c].replace(OLD13C, NEW13C, 1)
     changed.append(13); print("patch 13: applied (lines %d, %d, %d)" % (j+1, k+1, c+1))
 
 # 14: pick a subtitle automatically when casting; the file usually sits in the same torrent
 PICK = 'pickSubtitle: function (srcURL) { return new Promise(function (resolve) { try { var mode = castingUtils._castSubs(); if (mode === "off") return resolve(null); var m = String(srcURL || "").match(/\\/([0-9a-f]{40})\\/(\\d+)/); if (!m) return resolve(null); var ih = m[1], idx = parseInt(m[2], 10), efs = __webpack_require__(172); var stem = function (n) { return String(n).replace(/^.*[\\/\\\\]/, "").replace(/\\.[^.]+$/, "").toLowerCase(); }; var vid = efs.getFilename(ih, idx); if (!vid) return resolve(null); var want = stem(vid), hits = []; for (var i = 0; i < 500; i++) { var n = efs.getFilename(ih, i); if (!n) break; if (i === idx || !/\\.(srt|ass|ssa|sub|vtt)$/i.test(n)) continue; var b = stem(n); if (b === want) { hits.push({ i: i, tag: "" }); } else if (b.indexOf(want + ".") === 0) { hits.push({ i: i, tag: b.slice(want.length + 1) }); } } if (!hits.length) return resolve(null); var done = function (h) { resolve({ index: h.i, url: "http://127.0.0.1:11470/" + ih + "/" + h.i, name: efs.getFilename(ih, h.i) }); }; var exact = hits.filter(function (h) { return !h.tag; }); if (hits.length === 1 || (exact.length && hits.length === exact.length)) return done(exact[0] || hits[0]); castingUtils.userSubtitleLang(function (lang) { var L = { eng: ["en", "eng", "english"], nld: ["nl", "nld", "dut", "dutch"], ger: ["de", "ger", "deu", "german"], fre: ["fr", "fre", "fra", "french"], spa: ["es", "spa", "spanish"], por: ["pt", "por", "portuguese"], ita: ["it", "ita", "italian"], pol: ["pl", "pol", "polish"] }, l = String(lang || "").toLowerCase(), tags = L[l] || [l]; for (var k in L) { if (L[k].indexOf(l) >= 0) { tags = L[k]; break; } } var byLang = hits.filter(function (h) { return tags.indexOf(h.tag) >= 0; }); done(byLang[0] || exact[0] || hits[0]); }); } catch (e) { console.error("[patch] pickSubtitle:", e && e.message); resolve(null); } }); }, userSubtitleLang: function (cb) { var self = castingUtils; if (self._langAt && Date.now() - self._langAt < 3e5) return cb(self._lang); try { var db = self._uiDb(); if (!db) { self._lang = null, self._langAt = Date.now(); return cb(null); } if (/leveldb$/i.test(db)) { var lg = self._scanLevelDb(db, "subtitlesLanguage"); self._lang = lg, self._langAt = Date.now(); return cb(lg); } child.execFile(castingUtils._sqlite(), ["file:" + db + "?mode=ro", "SELECT hex(value) FROM ItemTable WHERE key=\'profile\';"], { timeout: 4e3, maxBuffer: 33554432 }, function (err, out) { var lang = null; try { if (!err && out.trim()) { var prof = JSON.parse(Buffer.from(out.trim(), "hex").toString("utf16le")), st = prof.settings || {}; if (!1 !== st.subtitlesAutoSelect) lang = st.subtitlesLanguage || null; } } catch (e) {} self._lang = lang, self._langAt = Date.now(); cb(lang); }); } catch (e) { self._lang = null, self._langAt = Date.now(); cb(null); } }, '
+PICK = ids(PICK)
 if any("pickSubtitle: function" in l for l in L): print("patch 14a: present")
 else:
     i = one(lambda l: l.strip().startswith("getMime: function(mimeURL)"), "patch 14a")
@@ -276,11 +305,14 @@ else:
     changed.append("14a"); print("patch 14a: applied (line %d)" % (i+1))
 
 # 14b/14c: use it in play(), after the line that nulls subtitlesSrc
-OLD14B = 'self.mediaStatus.length = 1e3 * info.duration, self.mediaStatus.time = wantedAt, self.delayedPlayFromStatus();'
+# without the closing ";": in 5.1.28 this sits inside a ternary, and a newer cast
+# that started during the lookup (playbackGeneration) must not be overruled
+OLD14B = 'self.mediaStatus.length = 1e3 * info.duration, self.mediaStatus.time = wantedAt, self.delayedPlayFromStatus()'
 NEW14B = ('self.mediaStatus.length = 1e3 * info.duration, self.mediaStatus.time = wantedAt, '
           'castingUtils.pickSubtitle(srcURL).then(function (sub) { '
+          'if ("undefined" != typeof generation && generation !== self.playbackGeneration) return; '
           'sub && !self.mediaStatus.subtitlesSrc && (self.mediaStatus.subtitlesSrc = sub.url); '
-          'self.delayedPlayFromStatus(); });')
+          'self.delayedPlayFromStatus(); })')
 if any("pickSubtitle(srcURL)" in l and "delayedPlayFromStatus" in l for l in L): print("patch 14b: present")
 else:
     i = one(lambda l: OLD14B in l, "patch 14b"); L[i] = L[i].replace(OLD14B, NEW14B, 1)
@@ -298,6 +330,7 @@ else:
 
 # 14d: fall back to OpenSubtitles when the torrent has no subtitle file of its own
 REMOTE = 'remoteSubtitle: function (ih, idx, lang, cb) { var self = castingUtils, done = false; var finish = function (r) { if (!done) { done = true; cb(r); } }; setTimeout(function () { finish(null); }, 12e3); try { self.videoIdFor(ih, idx, function (vid) { if (!vid) return finish(null); var base = "http://127.0.0.1:11470/" + ih + "/" + idx; fetch("http://127.0.0.1:11470/opensubHash?videoUrl=" + encodeURIComponent(base), { timeout: 9e3 }) .then(function (r) { return r.json(); }).catch(function () { return {}; }) .then(function (h) { var res = (h || {}).result || {}, extra = res.hash ? "/videoHash=" + res.hash + "&videoSize=" + res.size : ""; var kind = vid.indexOf(":") >= 0 ? "series" : "movie"; return fetch("https://opensubtitles-v3.strem.io/subtitles/" + kind + "/" + vid + extra + ".json", { timeout: 9e3, headers: { "User-Agent": "Stremio" } }).then(function (r) { return r.json(); }); }) .then(function (d) { var subs = (d || {}).subtitles || []; var L = { eng: ["en", "eng"], nld: ["nl", "nld", "dut"], ger: ["de", "ger", "deu"], fre: ["fr", "fre", "fra"], spa: ["es", "spa"], por: ["pt", "por", "pob"], ita: ["it", "ita"], pol: ["pl", "pol"] }; var l = String(lang || "").toLowerCase(), tags = L[l] || (l ? [l] : []); for (var k in L) { if (L[k].indexOf(l) >= 0) { tags = L[k]; break; } } var inLang = tags.length ? subs.filter(function (x) { return tags.indexOf(String(x.lang || "").toLowerCase()) >= 0; }) : subs; var exact = inLang.filter(function (x) { return x.m === "h"; }); var pick = exact[0] || inLang[0] || null; finish(pick ? { url: pick.url, name: pick.subtitleFileName || pick.id, remote: true, hashMatch: !!exact[0] } : null); }) .catch(function () { finish(null); }); }); } catch (e) { finish(null); } }, videoIdFor: function (ih, idx, cb) { try { var child2 = __webpack_require__(32), os2 = __webpack_require__(22), fs3 = __webpack_require__(1), path3 = __webpack_require__(5); var db = castingUtils._uiDb(); if (!db) return cb(null); child2.execFile(castingUtils._sqlite(), ["file:" + db + "?mode=ro", "SELECT hex(value) FROM ItemTable WHERE key=\'streams\';"], { timeout: 5e3, maxBuffer: 67108864 }, function (err, out) { if (err || !out.trim()) return cb(null); try { var data = JSON.parse(Buffer.from(out.trim(), "hex").toString("utf16le")); var items = data.items || []; for (var i = 0; i < items.length; i++) { var k = items[i][0], v = items[i][1] || {}, st = v.stream || {}; if (st.infoHash === ih && st.fileIdx === idx) return cb(k && k.videoId); } cb(null); } catch (e) { cb(null); } }); } catch (e) { cb(null); } }, aacEncoder: function (ffmpegPath) { if (castingUtils._aac) return castingUtils._aac; castingUtils._aac = \"aac\"; try { var out = __webpack_require__(32).execFileSync(ffmpegPath || \"ffmpeg\", [\"-hide_banner\", \"-encoders\"], { timeout: 5e3, maxBuffer: 8388608 }).toString(); if (out.indexOf(\"aac_at\") >= 0) castingUtils._aac = \"aac_at\"; } catch (e) {} return castingUtils._aac; }, _scanLevelDb: function (dir, key) { try { var fs5 = __webpack_require__(1), path5 = __webpack_require__(5); var files = fs5.readdirSync(dir); for (var i = files.length - 1; i >= 0; i--) { if (!/\\.(log|ldb)$/i.test(files[i])) continue; var raw = fs5.readFileSync(path5.join(dir, files[i])).toString("latin1"); var txt = raw.split(String.fromCharCode(0)).join(""); var at = txt.indexOf(key); if (at < 0) continue; var m = /([a-zA-Z]{2,3}(?:-[a-zA-Z]{2,4})?)/.exec(txt.slice(at + key.length, at + key.length + 24)); if (m) return m[1]; } } catch (e) {} return null; }, _castSubs: function () { try { var st = __webpack_require__(106); var v = st && st.castSubtitles; return v === undefined || v === null ? "auto" : String(v); } catch (e) { return "auto"; } }, _sqlite: function () { if (castingUtils._sq !== undefined) return castingUtils._sq; var fs4 = __webpack_require__(1), c = ["/usr/bin/sqlite3", "/usr/local/bin/sqlite3", "/opt/homebrew/bin/sqlite3"]; castingUtils._sq = "sqlite3"; for (var i = 0; i < c.length; i++) { try { if (fs4.existsSync(c[i])) { castingUtils._sq = c[i]; break; } } catch (e) {} } return castingUtils._sq; }, _uiDb: function () { try { var os2 = __webpack_require__(22), fs3 = __webpack_require__(1), path3 = __webpack_require__(5); if (castingUtils._db !== undefined) return castingUtils._db; var home = os2.homedir(), roots = []; if (process.platform === "darwin") { roots = [ path3.join(home, "Library/WebKit/com.westbridge.stremio5-mac/WebsiteData/Default"), path3.join(home, "Library/WebKit/com.stremio.stremio-shell-macos/WebsiteData/Default") ]; } else if (process.platform === "win32") { roots = [ path3.join(process.env.LOCALAPPDATA || "", "stremio5"), path3.join(process.env.LOCALAPPDATA || "", "Programs/LNV/Stremio-4"), path3.join(process.env.APPDATA || "", "stremio5") ]; } else { roots = [ path3.join(home, ".local/share/stremio5"), path3.join(home, ".stremio5") ]; } var found = null, walk = function (d, depth) { if (found || depth > 3) return; var ls; try { ls = fs3.readdirSync(d); } catch (e) { return; } for (var i = 0; i < ls.length; i++) { if (found) return; var full = path3.join(d, ls[i]); if (/localstorage\\.sqlite3?$/i.test(ls[i])) { found = full; return; } if (ls[i] === "leveldb") { try { if (fs3.statSync(full).isDirectory()) { found = full; return; } } catch (e) {} } try { if (fs3.statSync(full).isDirectory()) walk(full, depth + 1); } catch (e) {} } }; roots.forEach(function (r) { walk(r, 0); }); castingUtils._db = found; return found; } catch (e) { castingUtils._db = null; return null; } }, '
+REMOTE = ids(REMOTE)
 if any("remoteSubtitle: function" in l for l in L): print("patch 14d: present")
 else:
     i = one(lambda l: "pickSubtitle: function (srcURL)" in l, "patch 14d")
@@ -326,7 +359,8 @@ else:
     at = next(x for x in range(i, i + 8) if OLD in L[x])
     L[at] = L[at].replace(OLD, NEW, 1)
     # bij het starten van een cast eenmalig vragen wat het apparaat aankan
-    j = one(lambda l: "DLNAClient.prototype.play = function(srcURL, startAt)" in l, "patch 15 (probe)")
+    j = one(lambda l: "DLNAClient.prototype.play = function(srcURL, startAt)" in l
+            or "DLNAClient.prototype.play = function(srcURL, time)" in l, "patch 15 (probe)")
     k = next(x for x in range(j, j + 6) if "var self = this, wantedAt" in L[x])
     L[k] = L[k].rstrip() + (' if (self._canAc3 === undefined) { self._canAc3 = false; try { '
         'self.player.getSupportedProtocols(function (e, protos) { try { '
@@ -484,9 +518,11 @@ else:
 # 16: forget how the previous stream reported time when a new cast starts
 OLD16 = 'this.mediaStatus.source = srcURL, this.mediaStatus.time = parseInt(startAt, 10) || 0, this.mediaStatus.subtitlesSrc = null'
 NEW16 = 'this._absTime = undefined, this.mediaStatus.source = srcURL, this.mediaStatus.time = parseInt(startAt, 10) || 0, this.mediaStatus.subtitlesSrc = null'
+OLD16_28 = 'this.mediaStatus.source = srcURL, this.mediaStatus.time = Math.max(0, parseInt(time, 10) || 0),'
 if any("this._absTime = undefined, this.mediaStatus.source" in l for l in L): print("patch 16: present")
 else:
-    i = one(lambda l: OLD16 in l, "patch 16"); L[i] = L[i].replace(OLD16, NEW16, 1)
+    i = one(lambda l: OLD16 in l or OLD16_28 in l, "patch 16")
+    L[i] = L[i].replace("this.mediaStatus.source = srcURL, this.mediaStatus.time = ", "this._absTime = undefined, this.mediaStatus.source = srcURL, this.mediaStatus.time = ", 1)
     changed.append(16); print("patch 16: applied (line %d)" % (i+1))
 
 # 17: repair the XML a TV sends about itself, and never let a parse error kill the process
@@ -654,7 +690,7 @@ else:
     for old, new in reps24:
         if W.count(old) != 1: raise SystemExit("patch 24: anchor not unique: " + old[:70])
         W = W.replace(old, new, 1)
-    at = W.index("self.player.loadAsync(proxySrv, options);")
+    at = W.index("self.player.loadAsync(proxySrv, options)")   # 5.1.28: inside a ternary, no ";"
     close = W.index("}));", at)
     if close - at > 60: raise SystemExit("patch 24: load anchor moved")
     W = W[:close] + AFTER24 + W[close + 4:]
@@ -917,8 +953,13 @@ else:
     new33 = ('Player.prototype.methodInvoke = function(method, args, res) {\n'
              '        var statusOnly33 = "status" === method && !this.mediaStatus.source && this.constructor && this.constructor.APP_ID;\n'
              '        return (statusOnly33 ? Promise.resolve(this.mediaStatus) : this.init().then(this.__call.bind(this, method, args)))')
-    if W.count(old33) != 1: raise SystemExit("patch 33: anchor not unique")
-    W = W.replace(old33, new33, 1)
+    # 5.1.28 moved the init() into setParams, behind a command queue
+    old33b = '        return (stopping ? Promise.resolve() : this.init()).then((function() {'
+    new33b = ('        var statusOnly33 = "status" === method && !this.mediaStatus.source && this.constructor && this.constructor.APP_ID;\n'
+              '        return statusOnly33 ? Promise.resolve(this.mediaStatus) : (stopping ? Promise.resolve() : this.init()).then((function() {')
+    if W.count(old33) == 1: W = W.replace(old33, new33, 1)
+    elif W.count(old33b) == 1: W = W.replace(old33b, new33b, 1)
+    else: raise SystemExit("patch 33: anchor not unique")
     L[:] = W.split("\n"); changed.append(33); print("patch 33: applied")
 
 # 35: one status question to a Chromecast at a time, and no more bits than the film has.
@@ -945,6 +986,14 @@ else:
          'var kb35 = duration > 0 && length > 0 ? 8 * length / duration / 1e3 : 0, t35 = kb35 ? Math.round(Math.max(4e3, Math.min(12e3, 3 * kb35))) : 12e3; '
          'args.push("-c:v", "h264_videotoolbox", "-b:v", t35 + "k", "-maxrate", Math.round(4 * t35 / 3) + "k", "-bufsize", 2 * t35 + "k", "-profile:v", "high", "-vf", vf30.join(","));'),
     ]
+    # 5.1.28: status goes through setParams, which already runs one command at a
+    # time; the shared answer is returned from there
+    OLD35_28 = '        return statusOnly33 ? Promise.resolve(this.mediaStatus) : (stopping ? Promise.resolve() : this.init()).then((function() {'
+    if W.count(reps35[0][0]) == 0 and W.count(OLD35_28) == 1:
+        reps35[0] = (OLD35_28,
+            '        var cc35 = this.constructor && this.constructor.APP_ID, self35 = this;\n'
+            '        if (cc35 && "status" === method && !statusOnly33 && !stopping) { if (!this._st35 || (!this._st35busy && Date.now() - this._st35at > 3e3)) { this._st35at = Date.now(), this._st35busy = !0; this._st35 = this.init().then(function () { return self35.__call(method, [].concat(args[method])); }).catch(Player.handleError).then(function (v35) { return self35._st35busy = !1, v35; }); } return this._st35; }\n'
+            '        cc35 && "status" !== method && (this._st35 = null);\n' + OLD35_28)
     for old, new in reps35:
         if W.count(old) != 1: raise SystemExit("patch 35: anchor not unique (%d): %s" % (W.count(old), old[:60]))
         W = W.replace(old, new, 1)
@@ -1006,6 +1055,8 @@ else:
              '        this.request(ChromecastClient.channelsNS.connection, {\n'
              '            type: "CONNECT"\n'
              '        }, this.mediaSender, this.mediaReceiver)), this.requestResponse(')
+    if W.count(old38) == 0:   # 5.1.28 addresses the receiver by transportId, as it should
+        old38 = old38.replace(".sessionId,", ".transportId,"); new38 = new38.replace(".sessionId,", ".transportId,")
     if W.count(old38) != 1: raise SystemExit("patch 38: anchor not unique (%d)" % W.count(old38))
     L[:] = W.replace(old38, new38, 1).split("\n"); changed.append(38); print("patch 38: applied")
 
@@ -1025,6 +1076,14 @@ else:
              '        return this.client.ps ? self.requestResponse(ChromecastClient.channelsNS.receiver, {\n'
              '            type: "GET_STATUS"\n'
              '        }).then(function (r39) { return self._rs39 = Date.now(), r39; }) : (this._disconnect(), ')
+    if W.count(old39) == 0:   # 5.1.28 also checks that the socket is still alive
+        old39 = ('        return this.client.ps && !this.client.socket.destroyed ? self.requestResponse(ChromecastClient.channelsNS.receiver, {\n'
+                 '            type: "GET_STATUS"\n'
+                 '        }) : this._disconnect()')
+        new39 = ('        if (this.client.ps && !this.client.socket.destroyed && this.sessionStatus && this._rs39 && Date.now() - this._rs39 < 1e4) return Promise.resolve({ status: this.sessionStatus });\n'
+                 '        return this.client.ps && !this.client.socket.destroyed ? self.requestResponse(ChromecastClient.channelsNS.receiver, {\n'
+                 '            type: "GET_STATUS"\n'
+                 '        }).then(function (r39) { return self._rs39 = Date.now(), r39; }) : this._disconnect()')
     if W.count(old39) != 1: raise SystemExit("patch 39: anchor not unique (%d)" % W.count(old39))
     L[:] = W.replace(old39, new39, 1).split("\n"); changed.append(39); print("patch 39: applied")
 
@@ -1123,6 +1182,8 @@ else:
          'if (side43 && (headers["CaptionInfo.sec"] = "http://" + req.headers.host + "/subtitles.srt?from=" + encodeURIComponent(req.query.subtitles) + (subtitlesDelay ? "&offset=" + subtitlesDelay : "")), req.headers["getmediainfo.sec"] && (headers["MediaInfo.sec"]'),
         ('req.query.ac3, req.query.fmp4 ])', 'req.query.ac3, req.query.fmp4, side43 ])'),
     ]
+    if any("subtitlesDelay: this.mediaStatus.subtitlesDelay / 1e3" in l for l in L):   # 5.1.28 sends seconds, /subtitles.srt wants ms
+        reps43 = [(o, n.replace('"&offset=" + subtitlesDelay', '"&offset=" + Math.round(1e3 * subtitlesDelay)')) for o, n in reps43]
     for old, new in reps43:
         if W.count(old) != 1: raise SystemExit("patch 43: anchor not unique (%d): %s" % (W.count(old), old[:50]))
         W = W.replace(old, new, 1)

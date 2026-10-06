@@ -16,7 +16,10 @@
 #   STREMIO_APP_PATH  its settings folder (cast-formats.json lives there)
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(dirname "$HERE")
-APPDIR=/Applications/Stremio.app/Contents/MacOS
+# STREMIO_SANDBOX_APPDIR runs the copy with the node and ffmpeg of another
+# Stremio build, STREMIO_SANDBOX_SRC starts from another server.js (both for
+# testing a new Stremio release before it is installed)
+APPDIR=${STREMIO_SANDBOX_APPDIR:-/Applications/Stremio.app/Contents/MacOS}
 NODE=$APPDIR/node
 SB=${STREMIO_SANDBOX:-${TMPDIR:-/tmp}/stremio-sandbox}
 PORT=${STREMIO_SANDBOX_PORT:-11471}
@@ -45,7 +48,7 @@ case "${1:-status}" in
   start)
     stop >/dev/null
     mkdir -p "$SB/appdata"
-    src=$APPDIR/server.js; patch=1
+    src=${STREMIO_SANDBOX_SRC:-$APPDIR/server.js}; patch=1
     [ "${2:-}" = "--as-is" ] && patch=
     [ -n "${2:-}" ] && [ "${2:-}" != "--as-is" ] && src=$2
     cp "$src" "$SB/server.js"
