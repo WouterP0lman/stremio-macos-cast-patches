@@ -68,6 +68,12 @@ s = s.replace(old, "enginefs._server = http.createServer(app)), port = %s;" % po
 inj = 'if (!Array.isArray(Facilities)) throw new TypeError("Invalid facilities");'
 if s.count(inj) != 1: raise SystemExit("sandbox: discovery anchor not found")
 s = s.replace(inj, inj + ' var selfcc = this; process.env.FAKE_CC_HOST && setTimeout(function () { selfcc.collect({ facility: "MDNS", id: "demo-chromecast", name: "Demo Chromecast", host: process.env.FAKE_CC_HOST, location: process.env.FAKE_CC_HOST, type: "chromecast", icon: "chromecast", playerUIRoles: [ "playpause", "seek", "dub", "subtitles", "volume" ], usePlayerUI: !0, onlyHtml5Formats: !1 }); }, 300);')
+# Only devices on this Mac: the demo Chromecast and fake TVs. A real TV that the
+# copy discovers on the network is ignored, so no test (and no page left open on
+# the copy) ever talks to it.
+col = "Discovery.prototype.collect = function(device) {"
+if s.count(col) != 1: raise SystemExit("sandbox: collect anchor not found")
+s = s.replace(col, col + ' if (device && "external" !== device.type && "demo-chromecast" !== device.id) { var h0 = String(device.host || ""); try { h0 = h0 || new URL(String(device.location)).hostname; } catch (e0) {} var mine0 = [ "127.0.0.1", "localhost", "::1" ]; var nif0 = require("os").networkInterfaces(); Object.keys(nif0).forEach(function (k) { (nif0[k] || []).forEach(function (a) { mine0.push(a.address); }); }); if (mine0.indexOf(h0) < 0) return; }')
 open(p, "w", encoding="utf-8").write(s)
 PY
     cat "$REPO/webui/cast-mediasession.js" "$REPO/webui/cast-nextup.js" "$REPO/webui/cast-remote.js" > "$SB/cast-remote.js"
