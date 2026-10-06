@@ -1104,6 +1104,30 @@ else:
         W = W.replace(old, new, 1)
     L[:] = W.split("\n"); changed.append(42); print("patch 42: applied")
 
+# 43: a subtitle as a separate file for a TV that asks for one (opt-in).
+# A Samsung asks for a subtitle file itself (request header getcaptionInfo.sec) and
+# was seen fetching one, so the subtitle need not be burned in and the picture can
+# go through untouched. Whether it then shows it on screen has not been proven on a
+# real set, so this only happens with "castSubtitleFile": true in
+# server-settings.json. The stream then answers with CaptionInfo.sec pointing at
+# /subtitles.srt (delay included) and is not re-encoded for the subtitle. Every
+# other TV, and every TV with the setting off, gets the subtitle burned in as before.
+W = "\n".join(L)
+if "side43" in W: print("patch 43: present")
+else:
+    reps43 = [
+        ('req.once("error", noop);',
+         'req.once("error", noop); var side43 = !!req.query.subtitles && !!req.headers["getcaptioninfo.sec"] && (function () { try { var p43 = __webpack_require__(5), f43 = __webpack_require__(1), d43 = process.env.SETTINGS_PATH || process.env.APP_PATH || p43.join(process.env.HOME || "", "Library", "Application Support", "stremio-server"); return !0 === JSON.parse(f43.readFileSync(p43.join(d43, "server-settings.json"), "utf8")).castSubtitleFile; } catch (e43) { return !1; } })();'),
+        ('this.makeSubs(req.query.subtitles, subtitlesDelay)', 'this.makeSubs(side43 ? null : req.query.subtitles, subtitlesDelay)'),
+        ('if (req.headers["getmediainfo.sec"] && (headers["MediaInfo.sec"]',
+         'if (side43 && (headers["CaptionInfo.sec"] = "http://" + req.headers.host + "/subtitles.srt?from=" + encodeURIComponent(req.query.subtitles) + (subtitlesDelay ? "&offset=" + subtitlesDelay : "")), req.headers["getmediainfo.sec"] && (headers["MediaInfo.sec"]'),
+        ('req.query.ac3, req.query.fmp4 ])', 'req.query.ac3, req.query.fmp4, side43 ])'),
+    ]
+    for old, new in reps43:
+        if W.count(old) != 1: raise SystemExit("patch 43: anchor not unique (%d): %s" % (W.count(old), old[:50]))
+        W = W.replace(old, new, 1)
+    L[:] = W.split("\n"); changed.append(43); print("patch 43: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)
