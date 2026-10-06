@@ -14,7 +14,7 @@
     function install(nav, h) {
         var ms = nav && nav.mediaSession; if (!ms) return false;
         ACTIONS.forEach(function (a) {
-            try { ms.setActionHandler(a, h[a] ? function (d) { h[a](d || {}); } : null); } catch (e) { /* not every action exists everywhere */ }
+            try { ms.setActionHandler(a, h[a] ? function (d) { if (!h.isCasting || h.isCasting()) h[a](d || {}); } : null); } catch (e) { /* not every action exists everywhere */ }
         });
         return true;
     }
@@ -28,9 +28,12 @@
         }
     }
 
+    /* Stremio's own player uses the same media session (stremio-web #1475 keeps its
+     * keys working). Wiping every handler here would leave its keys dead until the
+     * player reloads, so the cast's handlers are only switched off: they check
+     * isCasting themselves, and the player registers its own again when it loads. */
     function clear(nav) {
         var ms = nav && nav.mediaSession; if (!ms) return;
-        ACTIONS.forEach(function (a) { try { ms.setActionHandler(a, null); } catch (e) {} });
         ms.playbackState = 'none';
     }
 

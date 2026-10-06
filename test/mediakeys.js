@@ -13,8 +13,9 @@ function Meta(o) { Object.assign(this, o); }
 M.update(nav, { title: "Game of Thrones S06E04", device: "METZ 2K TV", paused: false, time: 2100000, length: 3520000 }, Meta);
 ok("Now Playing shows the title and the TV", ms.metadata.title === "Game of Thrones S06E04" && /METZ/.test(ms.metadata.artist));
 ok("Now Playing shows state and position", ms.playbackState === "playing" && Math.round(ms.pos.position) === 2100 && Math.round(ms.pos.duration) === 3520);
-M.clear(nav);
-ok("handlers are released when the cast ends", M.ACTIONS.every((a) => handlers[a] === null) && ms.playbackState === "none");
+let casting = true; h.isCasting = () => casting; M.install(nav, h); calls.length = 0;
+casting = false; M.clear(nav); handlers.play(); handlers.pause();
+ok("after the cast the keys do nothing here and Stremio's own handlers are not wiped", calls.length === 0 && ms.playbackState === "none" && typeof handlers.play === "function");
 const dir = path.join(__dirname, "..", "webui"), bundle = fs.readFileSync(path.join(dir, "cast-mediasession.js"), "utf8") + fs.readFileSync(path.join(dir, "cast-remote.js"), "utf8");
 const tmp = path.join(require("os").tmpdir(), "cast-remote-bundle.js"); fs.writeFileSync(tmp, bundle);
 let syntax = true; try { cp.execFileSync(process.execPath, ["--check", tmp]); } catch (e) { syntax = false; }

@@ -395,7 +395,7 @@
     var mediaKeys = false;
     function syncMediaKeys() {
         var M = window.CastMediaSession; if (!M) return;
-        if (!device || !state.source) { if (mediaKeys) { M.clear(navigator); mediaKeys = false; } return; }
+        if (!device || !state.source) { if (mediaKeys) { M.clear(navigator); mediaKeys = false; } return; }  // handlers stay but go quiet
         if (!mediaKeys) {
             mediaKeys = M.install(navigator, {
                 play: function () { if (state.paused) togglePlay(); },
@@ -403,7 +403,8 @@
                 seekbackward: function () { skip(-10); },
                 seekforward: function () { skip(30); },
                 seekto: function (d) { if (typeof d.seekTime === 'number') seekTo(d.seekTime * 1000); },
-                stop: function () { stopCasting(); }
+                stop: function () { stopCasting(); },
+                isCasting: function () { return !!(device && state.source); }
             });
         }
         M.update(navigator, { title: mediaName.replace(/\.[^.]+$/, '') || 'Stremio', device: device.name,
