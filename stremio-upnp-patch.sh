@@ -921,6 +921,35 @@ else:
     W = W.replace(old33, new33, 1)
     L[:] = W.split("\n"); changed.append(33); print("patch 33: applied")
 
+# 35: one status question to a Chromecast at a time, and no more bits than the film has.
+# The player and the cast remote together ask for status almost twice a second,
+# and for a Chromecast each of those is two round trips to the TV (receiver and
+# media status). A METZ TV could not keep up: the log of one eight-minute cast
+# holds dozens of "Response timeout" errors, the player answered them with
+# pause-and-resume pairs, and every pair was a visible stutter. Status requests
+# for a Chromecast that is casting now share one question in flight and reuse
+# its answer for three seconds; any command clears it so the next status is fresh.
+# Second, the hardware encoder of patch 30 used 12 Mbit/s whatever the source:
+# a 1.6 Mbit/s HEVC episode went out as 12 to 16 Mbit/s over Wi-Fi. The target
+# is now three times the source bitrate, between 4 and 12 Mbit/s.
+W = "\n".join(L)
+if "_st35" in W: print("patch 35: present")
+else:
+    reps35 = [
+        ('        return (statusOnly33 ? Promise.resolve(this.mediaStatus) : this.init().then(this.__call.bind(this, method, args)))',
+         '        var cc35 = this.constructor && this.constructor.APP_ID, self35 = this;\n'
+         '        if (cc35 && "status" === method && !statusOnly33) { if (!this._st35 || (!this._st35busy && Date.now() - this._st35at > 3e3)) { this._st35at = Date.now(), this._st35busy = !0; this._st35 = this.init().then(this.__call.bind(this, method, args)).catch(Player.handleError).then(function (v35) { return self35._st35busy = !1, v35; }); } return this._st35.then(Player.returnJSON.bind(null, res)); }\n'
+         '        cc35 && "status" !== method && (this._st35 = null);\n'
+         '        return (statusOnly33 ? Promise.resolve(this.mediaStatus) : this.init().then(this.__call.bind(this, method, args)))'),
+        ('args.push("-c:v", "h264_videotoolbox", "-b:v", "12M", "-maxrate", "16M", "-bufsize", "24M", "-profile:v", "high", "-vf", vf30.join(","));',
+         'var kb35 = duration > 0 && length > 0 ? 8 * length / duration / 1e3 : 0, t35 = kb35 ? Math.round(Math.max(4e3, Math.min(12e3, 3 * kb35))) : 12e3; '
+         'args.push("-c:v", "h264_videotoolbox", "-b:v", t35 + "k", "-maxrate", Math.round(4 * t35 / 3) + "k", "-bufsize", 2 * t35 + "k", "-profile:v", "high", "-vf", vf30.join(","));'),
+    ]
+    for old, new in reps35:
+        if W.count(old) != 1: raise SystemExit("patch 35: anchor not unique (%d): %s" % (W.count(old), old[:60]))
+        W = W.replace(old, new, 1)
+    L[:] = W.split("\n"); changed.append(35); print("patch 35: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)
