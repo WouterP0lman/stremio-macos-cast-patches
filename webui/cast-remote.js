@@ -136,7 +136,7 @@
             if (hit) {
                 if (!device || device.id !== hit.device.id) {
                     device = hit.device;
-                    subtitleOptions = null;
+                    subtitleOptions = null; subtitleSourceKey = null;
                     held = null;
                 }
                 apply(hit.state);
@@ -144,7 +144,7 @@
                 device = null;
                 state = {};
                 held = null;
-                subtitleOptions = null;
+                subtitleOptions = null; subtitleSourceKey = null;
                 render();
             }
         });
@@ -278,7 +278,7 @@
         state = next;
         if (state.source && state.source !== subtitleSourceKey) {
             subtitleSourceKey = state.source;
-            subtitleOptions = null;
+            subtitleOptions = null; /* the key was just set for this stream */
             mediaName = '';
             loadSubtitleOptions();
         }
@@ -456,7 +456,7 @@
 
     function closeRemote() {
         setDismissed(castKey(device, state));
-        device = null; state = {}; held = null; subtitleOptions = null;
+        device = null; state = {}; held = null; subtitleOptions = null; subtitleSourceKey = null;
         render();
     }
 
@@ -466,7 +466,7 @@
     function stopCasting() {
         setDismissed(castKey(device, state));
         command({ source: '' });
-        device = null; state = {}; held = null; subtitleOptions = null;
+        device = null; state = {}; held = null; subtitleOptions = null; subtitleSourceKey = null;
         render();
     }
 

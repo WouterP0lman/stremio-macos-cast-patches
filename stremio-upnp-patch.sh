@@ -964,6 +964,29 @@ else:
     if W.count(old36) != 1: raise SystemExit("patch 36: anchor not unique (%d)" % W.count(old36))
     L[:] = W.replace(old36, new36, 1).split("\n"); changed.append(36); print("patch 36: applied")
 
+# 37: a subtitle chosen while casting to a Chromecast must reach the TV.
+# Choosing one sent the receiver a bare track description as if it were a media
+# command, which it ignores, and every LOAD went out with activeTrackIds empty, so a
+# track that did travel along was never switched on. The track also pointed at
+# /subtitles.srt while claiming to be WebVTT. Choosing a subtitle now reloads the
+# stream at the point the film has reached, with the track as WebVTT and switched on.
+W = "\n".join(L)
+if "sub37" in W: print("patch 37: present")
+else:
+    reps37 = [
+        ('trackContentId: subsURL = subsURL ? this.endpoint + "/subtitles.srt?from=" + encodeURIComponent(subsURL) : "",',
+         'trackContentId: subsURL = subsURL ? this.endpoint + "/subtitles.vtt?from=" + encodeURIComponent(subsURL) : "",'),
+        ('            activeTrackIds: [],\n',
+         '            activeTrackIds: this.mediaStatus.subtitlesSrc ? [ 1 ] : [] /* sub37 */,\n'),
+        ('        var subs = this._subsPrepare(subsURL, offset, style);\n        return this._mediaRequest(subs);',
+         '        var t37 = parseInt(this.mediaStatus.time, 10);\n'
+         '        return t37 > 0 && (this.seekTime = t37 / 1e3), this.playFromStatus();'),
+    ]
+    for old, new in reps37:
+        if W.count(old) != 1: raise SystemExit("patch 37: anchor not unique (%d): %s" % (W.count(old), old[:50]))
+        W = W.replace(old, new, 1)
+    L[:] = W.split("\n"); changed.append(37); print("patch 37: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)
