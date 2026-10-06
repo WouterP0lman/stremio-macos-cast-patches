@@ -900,6 +900,27 @@ else:
         W = W.replace(old, new, 1)
     L[:] = W.split("\n"); changed.append(32); print("patch 32: applied")
 
+# 33: asking a Chromecast how it is doing must not take the TV over.
+# Every request to /casting/<id>/player runs init() first, and for a Chromecast
+# init() launches Stremio's receiver app unless it is already on screen. The cast
+# remote asks each device for its status every few seconds to find the one that is
+# playing, so with Stremio open a Chromecast TV was switched to the Stremio
+# receiver again and again, whatever was on it, Netflix included. A plain status
+# request for a Chromecast that has nothing to play now answers from what the
+# server already knows and leaves the TV alone. Casting itself still launches the
+# receiver as before.
+W = "\n".join(L)
+if "statusOnly33" in W: print("patch 33: present")
+else:
+    old33 = ('Player.prototype.methodInvoke = function(method, args, res) {\n'
+             '        return this.init().then(this.__call.bind(this, method, args))')
+    new33 = ('Player.prototype.methodInvoke = function(method, args, res) {\n'
+             '        var statusOnly33 = "status" === method && !this.mediaStatus.source && this.constructor && this.constructor.APP_ID;\n'
+             '        return (statusOnly33 ? Promise.resolve(this.mediaStatus) : this.init().then(this.__call.bind(this, method, args)))')
+    if W.count(old33) != 1: raise SystemExit("patch 33: anchor not unique")
+    W = W.replace(old33, new33, 1)
+    L[:] = W.split("\n"); changed.append(33); print("patch 33: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)
@@ -960,7 +981,18 @@ if [ -n "$APP" ] && command -v codesign >/dev/null; then
   codesign --force --sign - --preserve-metadata=entitlements,flags,identifier "$APP"
   codesign --verify --deep --strict "$APP" && echo "signature OK"
   xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
-  open -a "$APP"
+  # Opening the app while the old instance is still shutting down can come to
+  # nothing, which left Stremio closed after a patch run. Wait for the server to
+  # answer, and open the app once more if it does not.
+  for attempt in 1 2; do
+    open -a "$APP"
+    for _ in $(seq 1 30); do
+      curl -s -m 2 -o /dev/null http://127.0.0.1:11470/settings && break 2
+      sleep 1
+    done
+    echo "Stremio did not come up, opening it again"
+  done
+  curl -s -m 2 -o /dev/null http://127.0.0.1:11470/settings && echo "Stremio is running" || echo "WARNING: Stremio did not start, open it yourself"
 else
   echo "Start Stremio again to pick up the changes."
 fi
