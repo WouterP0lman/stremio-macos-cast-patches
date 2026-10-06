@@ -21,6 +21,6 @@ let syntax = true; try { cp.execFileSync(process.execPath, ["--check", tmp]); } 
 ok("the served bundle parses", syntax);
 ok("the remote installs the keys while casting", /window\.CastMediaSession/.test(bundle) && /M\.install\(navigator/.test(bundle) && /syncMediaKeys\(\)/.test(bundle));
 const inst = fs.readFileSync(path.join(__dirname, "..", "stremio-upnp-patch.sh"), "utf8");
-ok("the installer ships the helper with the remote", /cat "\$DIR\/webui\/cast-mediasession\.js" "\$DIR\/webui\/cast-remote\.js"/.test(inst));
+ok("the installer ships the helper with the remote", /cat "\$DIR\/webui\/cast-mediasession\.js" "\$DIR\/webui\/cast-nextup\.js" "\$DIR\/webui\/cast-remote\.js"/.test(inst));
 let bad = 0; for (const [w, c] of checks) { console.error((c ? "ok   " : "FAIL ") + w); if (!c) bad++; }
 console.log(bad); process.exit(bad ? 1 : 0);

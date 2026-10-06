@@ -1179,7 +1179,7 @@ echo "syntax OK"
 # the remote lives next to server.js so the server can hand it to the interface
 if [ -f "$DIR/webui/cast-remote.js" ]; then
   # the helpers it uses go in front of it, so the page loads one file
-  cat "$DIR/webui/cast-mediasession.js" "$DIR/webui/cast-remote.js" > "$(dirname "$S")/cast-remote.js"
+  cat "$DIR/webui/cast-mediasession.js" "$DIR/webui/cast-nextup.js" "$DIR/webui/cast-remote.js" > "$(dirname "$S")/cast-remote.js"
   echo "cast remote installed next to server.js"
   # The interface page came without cache headers, so the app may be holding a copy
   # from before the patch and would never see the remote. Drop that one cache.

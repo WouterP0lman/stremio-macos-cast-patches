@@ -410,6 +410,32 @@
                               paused: state.paused, time: state.time, length: state.length }, window.MediaMetadata);
     }
 
+    /* The next episode at the end of this one (cast-nextup.js): ten seconds that
+     * can be cancelled, then the next file from the same torrent. */
+    var nextAt = 0, nextTimer = null, nextSkip = '';
+    function syncNextUp() {
+        var N = window.CastNextUp; if (!N || !device) return;
+        if (!state.source || nextSkip === state.source || !N.atEnd(state)) {
+            if (nextTimer && !(state.source && N.atEnd(state))) { clearTimeout(nextTimer); nextTimer = null; nextAt = 0; }
+            return;
+        }
+        if (nextTimer) return;
+        nextAt = Date.now() + N.COUNTDOWN_MS;
+        nextTimer = setTimeout(playNext, N.COUNTDOWN_MS);
+    }
+    function cancelNext() { clearTimeout(nextTimer); nextTimer = null; nextAt = 0; nextSkip = state.source || ''; render(); }
+    function playNext() {
+        nextTimer = null; nextAt = 0;
+        var src = state.source || '', m = src.match(/\/([0-9a-f]{40})\/(\d+)/i);
+        nextSkip = src;
+        if (!m) return;
+        get('/stats.json').then(function (stats) {
+            var entry = stats && (stats[m[1].toLowerCase()] || stats[m[1]]);
+            var i = window.CastNextUp.nextInPack((entry && entry.files) || [], parseInt(m[2], 10));
+            if (i >= 0) command({ source: SERVER + '/' + m[1].toLowerCase() + '/' + i, time: 0 });
+        });
+    }
+
     function togglePlay() {
         var next = !state.paused;
         hold({ paused: next });
@@ -570,6 +596,7 @@
 
     function render() {
         try { syncMediaKeys(); } catch (e) { /* media keys are a convenience, never a failure */ }
+        try { syncNextUp(); } catch (e) { /* so is the next episode */ }
         if (!device) {
             if (host.parentNode) host.parentNode.removeChild(host);
             return;
@@ -689,6 +716,15 @@
             function () { nudgeSubtitles(500); }));
         panel.appendChild(delayRow);
 
+        if (nextAt) {
+            var nextRow = el('div', 'row');
+            var nl = el('span', 'label'); nl.textContent = 'Next';
+            nextRow.appendChild(nl);
+            var nt = el('span', 'delay'); nt.textContent = 'next episode in ' + Math.max(0, Math.ceil((nextAt - Date.now()) / 1000)) + 's';
+            nextRow.appendChild(nt);
+            nextRow.appendChild(btn('Cancel', 'Stay on this episode', cancelNext));
+            panel.appendChild(nextRow);
+        }
         var endRow = el('div', 'row end');
         endRow.appendChild(btn('Stop casting', 'Stop the film on the TV', stopCasting));
         panel.appendChild(endRow);
