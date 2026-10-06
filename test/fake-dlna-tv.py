@@ -39,6 +39,7 @@ Options:
                  including every UPnP action it received and when
   --events       send a status event every five seconds once subscribed, the way
                  a real TV does, and record whether the server answers it
+  --hevc         list HEVC among the formats it plays
   --direct-only  announce only to the Stremio process under test, never on the
                  multicast port, so a Stremio that is not being tested never
                  lists this TV (set STREMIO_PID to pick the process)
@@ -55,6 +56,7 @@ RELATIVE = "--relative" in sys.argv          # report time since play, not the a
 NO_MKV = "--no-mkv" in sys.argv              # refuse live Matroska, like a Samsung Q80 does
 EVENTS = "--events" in sys.argv              # send status events and record the answers
 DIRECT_ONLY = "--direct-only" in sys.argv    # announce to the process under test only
+HEVC = "--hevc" in sys.argv                  # list HEVC among the formats it plays, like a 2019+ Samsung
 T0 = time.time()
 STATE_FILE = None
 if "--state-file" in sys.argv:
@@ -162,7 +164,7 @@ CM = _scpd([
 SINK = ",".join([
     "http-get:*:video/mp4:*", "http-get:*:video/x-matroska:*", "http-get:*:video/mpeg:*",
     "http-get:*:video/x-mkv:*", "http-get:*:audio/mpeg:*",
-])
+] + (["http-get:*:video/mp4:DLNA.ORG_PN=HEVC_MP4_MAIN", "http-get:*:video/x-matroska:DLNA.ORG_PN=HEVC_MKV"] if HEVC else []))
 
 
 def envelope(action, service, inner):

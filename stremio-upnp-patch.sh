@@ -1084,6 +1084,26 @@ else:
     if W.count(old41) != 1: raise SystemExit("patch 41: anchor not unique (%d)" % W.count(old41))
     L[:] = W.replace(old41, new41, 1).split("\n"); changed.append(41); print("patch 41: applied")
 
+# 42: HEVC goes through untouched to a TV that lists HEVC.
+# Only H.264 was ever copied; every HEVC film was re-encoded, even for a Samsung that
+# plays HEVC itself. The TV's own list of formats (asked for in patch 15) now also
+# says whether it takes HEVC, and if it does, HEVC video is copied as it is, unless
+# a subtitle has to be burned in. A TV that does not list HEVC still gets H.264.
+W = "\n".join(L)
+if "_canHevc" in W: print("patch 42: present")
+else:
+    reps42 = [
+        ('ac3: this._canAc3 ? 1 : 0,', 'ac3: this._canAc3 ? 1 : 0, hevc: this._canHevc ? 1 : 0,'),
+        ("self._canAc3 = /ac-?3|dolby/.test(txt) || /mpeg_ts_(sd|hd)_(na|eu|ko)/.test(txt);",
+         "self._canAc3 = /ac-?3|dolby/.test(txt) || /mpeg_ts_(sd|hd)_(na|eu|ko)/.test(txt); self._canHevc = /hevc|h\\.?265/.test(txt);"),
+        ('                    return "Video" == stream.type && "h264" == stream.codec;\n',
+         '                    return "Video" == stream.type && ("h264" == stream.codec || "1" === String(req.query.hevc) && "hevc" == stream.codec);\n'),
+    ]
+    for old, new in reps42:
+        if W.count(old) != 1: raise SystemExit("patch 42: anchor not unique (%d): %s" % (W.count(old), old[:50]))
+        W = W.replace(old, new, 1)
+    L[:] = W.split("\n"); changed.append(42); print("patch 42: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)
