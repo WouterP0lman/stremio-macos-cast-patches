@@ -1044,6 +1044,46 @@ else:
     W = W.replace('"http://127.0.0.1:11470/', '"http://127.0.0.1:" + (global.__port40 || 11470) + "/')
     L[:] = W.split("\n"); changed.append(40); print("patch 40: applied (%d places)" % n40)
 
+# 41: one transcode per cast, shared by every request the TV makes for it.
+# A Samsung asks HEAD, GET, HEAD, GET for one cast, and each GET started its own
+# ffmpeg on the same source: two encoders, two reads of the torrent, for one film.
+# Requests for the same stream (same source, start, tracks and format) now share one
+# ffmpeg. A later request first gets what was already produced, from the start (up
+# to 64 MB kept), then follows live. A slow reader holds the encoder back instead of
+# letting memory grow. The encoder stops 8 seconds after the last reader leaves.
+W = "\n".join(L)
+if "__ses41" in W: print("patch 41: present")
+else:
+    old41 = ('                console.log("Arguments " + args.join(" "));\n'
+             '                var procOpts = {\n'
+             '                    detached: !0,\n'
+             '                    stdio: [ "ignore", null, ffmpegErrors ]\n'
+             '                }, transcodingProc = child.spawn(ffmpegPath, args, procOpts);\n'
+             '                pump(transcodingProc.stdout, res, (function(e) {\n'
+             '                    console.log(" ---\\x3e CLOSE", e ? e.message : ""), transcodingProc.kill("SIGKILL"), \n'
+             '                    subtitles && fs.unlink(subtitles, noop);\n'
+             '                }));\n')
+    new41 = ('                0;\n'
+             '                var key41 = JSON.stringify([ req.path, req.query.video, req.query.time, req.query.audioTrack, req.query.subtitles, req.query.subtitlesDelay, req.query.ts, req.query.ac3, req.query.fmp4 ]), S41 = global.__ses41 || (global.__ses41 = {}), s41 = S41[key41];\n'
+             '                if (s41 && (s41.dead || s41.overflow)) s41 = null;\n'
+             '                if (s41) { console.log("Session shared for a further request"); subtitles && fs.unlink(subtitles, noop); } else {\n'
+             '                console.log("Arguments " + args.join(" "));\n'
+             '                var procOpts = {\n'
+             '                    detached: !0,\n'
+             '                    stdio: [ "ignore", null, ffmpegErrors ]\n'
+             '                }, transcodingProc = child.spawn(ffmpegPath, args, procOpts), subs41 = subtitles;\n'
+             '                s41 = S41[key41] = { proc: transcodingProc, chunks: [], size: 0, ended: !1, dead: !1, overflow: !1, subs: [], idle: null, paused: !1 };\n'
+             '                (function (s) { s.drain = function () { s.paused && s.subs.every(function (r) { return !r.writableNeedDrain; }) && (s.paused = !1, s.proc.stdout.resume()); };\n'
+             '                s.end = function () { if (s.dead) return; s.dead = !0, clearTimeout(s.idle); try { s.proc.kill("SIGKILL"); } catch (x) {} subs41 && fs.unlink(subs41, noop); S41[key41] === s && delete S41[key41]; console.log(" ---\\x3e CLOSE session"); };\n'
+             '                s.proc.stdout.on("data", function (c) { s.overflow || (s.size + c.length <= 64e6 ? (s.chunks.push(c), s.size += c.length) : (s.overflow = !0, s.chunks = [])); s.subs.forEach(function (r) { r.write(c) || s.paused || (s.paused = !0, s.proc.stdout.pause(), r.once("drain", s.drain)); }); });\n'
+             '                var fin41 = function () { s.ended || (s.ended = !0, s.subs.forEach(function (r) { r.end(); })); };\n'
+             '                s.proc.stdout.on("end", fin41), s.proc.on("exit", fin41), s.proc.on("error", fin41); })(s41);\n'
+             '                }\n'
+             '                clearTimeout(s41.idle), res.on("error", noop), s41.chunks.forEach(function (c) { res.write(c); }), s41.ended ? res.end() : s41.subs.push(res);\n'
+             '                res.on("close", (function (s) { return function () { var i = s.subs.indexOf(res); i >= 0 && s.subs.splice(i, 1), s.drain(), s.subs.length || (clearTimeout(s.idle), s.idle = setTimeout(s.end, 8e3)); }; })(s41));\n')
+    if W.count(old41) != 1: raise SystemExit("patch 41: anchor not unique (%d)" % W.count(old41))
+    L[:] = W.replace(old41, new41, 1).split("\n"); changed.append(41); print("patch 41: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)
