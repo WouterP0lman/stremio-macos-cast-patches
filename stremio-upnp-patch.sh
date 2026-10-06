@@ -950,6 +950,20 @@ else:
         W = W.replace(old, new, 1)
     L[:] = W.split("\n"); changed.append(35); print("patch 35: applied")
 
+# 36: keep looking for Chromecasts.
+# Stremio sends one mDNS query when it starts and never asks again. A TV that is
+# asleep, slow or switched on later never shows up in the cast menu ("No cast
+# devices found"), while the Mac itself sees it announce. Ask again every thirty
+# seconds.
+W = "\n".join(L)
+if "timer36" in W: print("patch 36: present")
+else:
+    old36 = 'MDNSDiscovery.prototype.search = function() {\n        for (var service in this.MDNSServices) this.mdns.query(service, "PTR");'
+    new36 = ('MDNSDiscovery.prototype.search = function() {\n        this.timer36 || (this.timer36 = setInterval(this.search.bind(this), 3e4));\n'
+             '        for (var service in this.MDNSServices) this.mdns.query(service, "PTR");')
+    if W.count(old36) != 1: raise SystemExit("patch 36: anchor not unique (%d)" % W.count(old36))
+    L[:] = W.replace(old36, new36, 1).split("\n"); changed.append(36); print("patch 36: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)
