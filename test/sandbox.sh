@@ -67,7 +67,7 @@ if s.count(inj) != 1: raise SystemExit("sandbox: discovery anchor not found")
 s = s.replace(inj, inj + ' var selfcc = this; process.env.FAKE_CC_HOST && setTimeout(function () { selfcc.collect({ facility: "MDNS", id: "demo-chromecast", name: "Demo Chromecast", host: process.env.FAKE_CC_HOST, location: process.env.FAKE_CC_HOST, type: "chromecast", icon: "chromecast", playerUIRoles: [ "playpause", "seek", "dub", "subtitles", "volume" ], usePlayerUI: !0, onlyHtml5Formats: !1 }); }, 300);')
 open(p, "w", encoding="utf-8").write(s)
 PY
-    cp "$REPO/webui/cast-remote.js" "$SB/cast-remote.js"
+    cat "$REPO/webui/cast-mediasession.js" "$REPO/webui/cast-remote.js" > "$SB/cast-remote.js"
     : > "$SB/server.log"
     # exec, so the pid is node's own and no shell in between keeps our output open
     ( cd "$SB" && APP_PATH="$SB/appdata" NO_HTTPS_SERVER=1 exec nohup "$NODE" "$SB/server.js" >>"$SB/server.log" 2>&1 </dev/null ) &

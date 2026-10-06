@@ -391,6 +391,25 @@
 
     /* ---------- what the buttons do ---------- */
 
+    /* Media keys and Now Playing follow the cast (cast-mediasession.js). */
+    var mediaKeys = false;
+    function syncMediaKeys() {
+        var M = window.CastMediaSession; if (!M) return;
+        if (!device || !state.source) { if (mediaKeys) { M.clear(navigator); mediaKeys = false; } return; }
+        if (!mediaKeys) {
+            mediaKeys = M.install(navigator, {
+                play: function () { if (state.paused) togglePlay(); },
+                pause: function () { if (!state.paused) togglePlay(); },
+                seekbackward: function () { skip(-10); },
+                seekforward: function () { skip(30); },
+                seekto: function (d) { if (typeof d.seekTime === 'number') seekTo(d.seekTime * 1000); },
+                stop: function () { stopCasting(); }
+            });
+        }
+        M.update(navigator, { title: mediaName.replace(/\.[^.]+$/, '') || 'Stremio', device: device.name,
+                              paused: state.paused, time: state.time, length: state.length }, window.MediaMetadata);
+    }
+
     function togglePlay() {
         var next = !state.paused;
         hold({ paused: next });
@@ -550,6 +569,7 @@
     }
 
     function render() {
+        try { syncMediaKeys(); } catch (e) { /* media keys are a convenience, never a failure */ }
         if (!device) {
             if (host.parentNode) host.parentNode.removeChild(host);
             return;

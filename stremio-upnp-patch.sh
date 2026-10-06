@@ -1128,6 +1128,17 @@ else:
         W = W.replace(old, new, 1)
     L[:] = W.split("\n"); changed.append(43); print("patch 43: applied")
 
+# 44: serve the cast remote that lies next to this server.js first.
+# The remote was looked up next to the node binary before next to server.js. In
+# the app both are the same folder; a second server run with the app's node (the
+# test sandbox) served the app's remote instead of its own.
+W = "\n".join(L)
+if "here44" in W: print("patch 44: present")
+else:
+    old44 = 'var here = [process.execPath, process.argv[1] || ""]'
+    if W.count(old44) != 1: raise SystemExit("patch 44: anchor not unique (%d)" % W.count(old44))
+    L[:] = W.replace(old44, 'var here = [process.argv[1] || "", process.execPath] /* here44 */', 1).split("\n"); changed.append(44); print("patch 44: applied")
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)
@@ -1167,7 +1178,8 @@ fi
 echo "syntax OK"
 # the remote lives next to server.js so the server can hand it to the interface
 if [ -f "$DIR/webui/cast-remote.js" ]; then
-  cp "$DIR/webui/cast-remote.js" "$(dirname "$S")/cast-remote.js"
+  # the helpers it uses go in front of it, so the page loads one file
+  cat "$DIR/webui/cast-mediasession.js" "$DIR/webui/cast-remote.js" > "$(dirname "$S")/cast-remote.js"
   echo "cast remote installed next to server.js"
   # The interface page came without cache headers, so the app may be holding a copy
   # from before the patch and would never see the remote. Drop that one cache.
