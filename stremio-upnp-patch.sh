@@ -987,6 +987,63 @@ else:
         W = W.replace(old, new, 1)
     L[:] = W.split("\n"); changed.append(37); print("patch 37: applied")
 
+# 38: talk to a Chromecast over one connection, not a new one per status request.
+# _connectMedia made up a new virtual sender id and sent CONNECT for every status
+# request, so over an hour of casting the TV was asked to keep track of hundreds of
+# senders, and each poll cost three messages instead of two. A slow TV (a METZ with
+# Chromecast built-in) answered later and later. The sender is now kept for as long
+# as the receiver session is the same. Measured on a demo Chromecast: CONNECT is
+# sent once per receiver session instead of once per poll.
+W = "\n".join(L)
+if "sid38" in W: print("patch 38: present")
+else:
+    old38 = ('        return this.mediaSender = "client-" + Math.floor(1e6 * Math.random()), this.mediaReceiver = this.sessionStatus.applications[0].sessionId, \n'
+             '        this.request(ChromecastClient.channelsNS.connection, {\n'
+             '            type: "CONNECT"\n'
+             '        }, this.mediaSender, this.mediaReceiver), this.requestResponse(')
+    new38 = ('        var sid38 = this.sessionStatus.applications[0].sessionId, fresh38 = !this.mediaSender || this.mediaReceiver !== sid38;\n'
+             '        return fresh38 && (this.mediaSender = "client-" + Math.floor(1e6 * Math.random()), this.mediaReceiver = sid38, \n'
+             '        this.request(ChromecastClient.channelsNS.connection, {\n'
+             '            type: "CONNECT"\n'
+             '        }, this.mediaSender, this.mediaReceiver)), this.requestResponse(')
+    if W.count(old38) != 1: raise SystemExit("patch 38: anchor not unique (%d)" % W.count(old38))
+    L[:] = W.replace(old38, new38, 1).split("\n"); changed.append(38); print("patch 38: applied")
+
+# 39: ask a connected Chromecast which app it runs every ten seconds, not every poll.
+# With the status cache of patch 35 and one sender (38), each poll still asked the
+# receiver for its application list before asking the player for its state. Which
+# app is on screen changes rarely; the player state is what a poll is for. While
+# connected, the receiver status is reused for ten seconds. Demo Chromecast at the
+# pace of the player and the cast remote together: under 30 messages a minute.
+W = "\n".join(L)
+if "_rs39" in W: print("patch 39: present")
+else:
+    old39 = ('        return this.client.ps ? self.requestResponse(ChromecastClient.channelsNS.receiver, {\n'
+             '            type: "GET_STATUS"\n'
+             '        }) : (this._disconnect(), ')
+    new39 = ('        if (this.client.ps && this.sessionStatus && this._rs39 && Date.now() - this._rs39 < 1e4) return Promise.resolve({ status: this.sessionStatus });\n'
+             '        return this.client.ps ? self.requestResponse(ChromecastClient.channelsNS.receiver, {\n'
+             '            type: "GET_STATUS"\n'
+             '        }).then(function (r39) { return self._rs39 = Date.now(), r39; }) : (this._disconnect(), ')
+    if W.count(old39) != 1: raise SystemExit("patch 39: anchor not unique (%d)" % W.count(old39))
+    L[:] = W.replace(old39, new39, 1).split("\n"); changed.append(39); print("patch 39: applied")
+
+# 40: fetch subtitles from this server, whatever port it got.
+# makeSubs and the subtitle picker of patch 14 fetched from http://127.0.0.1:11470
+# by name. When 11470 is taken the server moves to 11471, and every burned-in
+# subtitle then came from another process or from nothing: the picture stayed
+# bare. They now use the port the server is actually listening on.
+W = "\n".join(L)
+if "__port40" in W: print("patch 40: present")
+else:
+    anchor40 = 'enginefs.baseUrlLocal = "http://127.0.0.1:" + server.address().port'
+    if W.count(anchor40) != 1: raise SystemExit("patch 40: listen anchor not unique")
+    W = W.replace(anchor40, 'global.__port40 = server.address().port, ' + anchor40, 1)
+    n40 = W.count('"http://127.0.0.1:11470/')
+    if n40 < 2: raise SystemExit("patch 40: expected the hard-coded subtitle URLs, found %d" % n40)
+    W = W.replace('"http://127.0.0.1:11470/', '"http://127.0.0.1:" + (global.__port40 || 11470) + "/')
+    L[:] = W.split("\n"); changed.append(40); print("patch 40: applied (%d places)" % n40)
+
 if changed and not dry:
     open(p, "w", encoding="utf-8").write("\n".join(L)); print("written:", p)
 elif changed: print("DRY: patches %s NOT written" % changed)

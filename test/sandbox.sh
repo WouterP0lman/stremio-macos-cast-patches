@@ -60,7 +60,12 @@ p, port = sys.argv[1], sys.argv[2]
 s = open(p, encoding="utf-8").read()
 old = "enginefs._server = http.createServer(app)), port = 11470;"
 if s.count(old) != 1: raise SystemExit("sandbox: port anchor not found")
-open(p, "w", encoding="utf-8").write(s.replace(old, "enginefs._server = http.createServer(app)), port = %s;" % port))
+s = s.replace(old, "enginefs._server = http.createServer(app)), port = %s;" % port)
+# a demo Chromecast for this copy only: FAKE_CC_HOST names it, nothing announces it
+inj = 'if (!Array.isArray(Facilities)) throw new TypeError("Invalid facilities");'
+if s.count(inj) != 1: raise SystemExit("sandbox: discovery anchor not found")
+s = s.replace(inj, inj + ' var selfcc = this; process.env.FAKE_CC_HOST && setTimeout(function () { selfcc.collect({ facility: "MDNS", id: "demo-chromecast", name: "Demo Chromecast", host: process.env.FAKE_CC_HOST, location: process.env.FAKE_CC_HOST, type: "chromecast", icon: "chromecast", playerUIRoles: [ "playpause", "seek", "dub", "subtitles", "volume" ], usePlayerUI: !0, onlyHtml5Formats: !1 }); }, 300);')
+open(p, "w", encoding="utf-8").write(s)
 PY
     cp "$REPO/webui/cast-remote.js" "$SB/cast-remote.js"
     : > "$SB/server.log"
